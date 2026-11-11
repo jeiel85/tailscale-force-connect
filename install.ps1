@@ -14,7 +14,12 @@ $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIden
 if (-not $isAdmin) {
     $argList = "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`""
     if ($NoTest) { $argList += ' -NoTest' }
-    $p = Start-Process powershell.exe -Verb RunAs -ArgumentList $argList -PassThru -Wait
+    try {
+        $p = Start-Process powershell.exe -Verb RunAs -ArgumentList $argList -PassThru -Wait
+    } catch {
+        Write-Host '관리자 권한을 받지 못해 설치하지 않았습니다. 다시 실행해서 UAC 창에서 [예]를 누르세요.' -ForegroundColor Yellow
+        exit 1
+    }
     if (Test-Path $logFile) { Get-Content $logFile -Encoding UTF8 }
     exit $p.ExitCode
 }
