@@ -13,11 +13,9 @@
     $tmp = $null
     try {
         if (Test-Path $local) {
-            # Copy it out first: uninstall.ps1 deletes the folder it lives in.
-            $tmp = Join-Path $env:TEMP ('tailscale-force-connect-' + [guid]::NewGuid().ToString('N'))
-            New-Item -ItemType Directory -Path $tmp | Out-Null
-            $uninstaller = Join-Path $tmp 'uninstall.ps1'
-            Copy-Item -Path $local -Destination $uninstaller
+            # Run it in place: the folder is admin-only, so nothing can swap the file before it runs elevated.
+            # (A script may delete its own folder while running; PowerShell has already read it.)
+            $uninstaller = $local
         } else {
             try {
                 [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12

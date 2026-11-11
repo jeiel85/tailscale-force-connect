@@ -48,8 +48,12 @@ function Get-BackendState {
 }
 
 # 로그가 너무 커지지 않게 최근 500줄만 유지
+# 파이프라인으로 같은 파일을 읽으면서 쓰면 '사용 중' 오류가 나므로, 먼저 다 읽은 뒤 쓴다.
 if ((Test-Path $logFile) -and ((Get-Item $logFile).Length -gt 200KB)) {
-    Get-Content $logFile -Tail 500 | Set-Content $logFile -Encoding UTF8
+    try {
+        $tail = Get-Content $logFile -Tail 500 -Encoding UTF8
+        Set-Content -Path $logFile -Value $tail -Encoding UTF8
+    } catch { }
 }
 
 Log '--- 시작 ---'

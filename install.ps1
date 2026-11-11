@@ -1,8 +1,8 @@
 ﻿# Tailscale 부팅 시 강제 연결 - 설치
 #   powershell -ExecutionPolicy Bypass -File .\install.ps1          # 설치 + 끊긴 상태에서 동작 검증
 #   powershell -ExecutionPolicy Bypass -File .\install.ps1 -NoTest  # 설치만 (연결을 끊지 않음)
-# 관리자 권한이 아니면 UAC로 스스로 다시 실행한다.
-param([switch]$NoTest)
+# 관리자 권한이 아니면 UAC로 스스로 다시 실행하고, 관리자 창의 결과를 이 창에 보여 준다.
+param([switch]$NoTest, [string]$ResultFile)
 
 $ErrorActionPreference = 'Stop'
 $dir         = 'C:\ProgramData\TailscaleAutoConnect'
@@ -12,7 +12,9 @@ $logFile     = Join-Path $dir 'install.log'
 
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 if (-not $isAdmin) {
-    $argList = "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`""
+    # 관리자 창은 끝나자마자 닫히므로 결과를 새 임시 파일로 넘겨받는다(이전 install.log를 잘못 보여 주지 않도록).
+    $result  = Join-Path $env:TEMP ('tailscale-force-connect-install-' + [guid]::NewGuid().ToString('N') + '.txt')
+    $argList = "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`" -ResultFile `"$result`""
     if ($NoTest) { $argList += ' -NoTest' }
     try {
         $p = Start-Process powershell.exe -Verb RunAs -ArgumentList $argList -PassThru -Wait
@@ -20,18 +22,35 @@ if (-not $isAdmin) {
         Write-Host '관리자 권한을 받지 못해 설치하지 않았습니다. 다시 실행해서 UAC 창에서 [예]를 누르세요.' -ForegroundColor Yellow
         exit 1
     }
-    if (Test-Path $logFile) { Get-Content $logFile -Encoding UTF8 }
+    if (Test-Path -LiteralPath $result) {
+        Get-Content -LiteralPath $result -Encoding UTF8
+        Remove-Item -LiteralPath $result -Force -ErrorAction SilentlyContinue
+    } else {
+        Write-Host '관리자 창이 결과를 남기지 못했습니다. 관리자 PowerShell에서 install.ps1을 직접 실행해 오류를 확인하세요.' -ForegroundColor Yellow
+    }
     exit $p.ExitCode
 }
+
+# 결과 파일은 사용자가 쓸 수 있는 %TEMP%에 있으므로, 이미 있는 파일(링크 포함)에는 쓰지 않고 새로 만들 때만 쓴다.
+$script:resultWriter = $null
+if ($ResultFile) {
+    try {
+        $fs = [IO.File]::Open($ResultFile, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::Read)
+        $script:resultWriter = New-Object IO.StreamWriter($fs, (New-Object Text.UTF8Encoding $true))
+        $script:resultWriter.AutoFlush = $true
+    } catch { $script:resultWriter = $null }
+}
+$script:logReady = $false
 
 # 주의: 'R' 같은 짧은 이름은 기본 별칭(r = Invoke-History)과 겹쳐 함수가 무시되므로 쓰지 않는다.
 function Write-Report($m) {
     Write-Host $m
-    Add-Content -Path $logFile -Value $m -Encoding UTF8
+    if ($script:resultWriter) { $script:resultWriter.WriteLine($m) }
+    if ($script:logReady) { Add-Content -LiteralPath $logFile -Value $m -Encoding UTF8 }
 }
 function Get-TsState {
     if (-not $ts) { return $null }
-    (& $ts status --json 2>$null | Out-String | ConvertFrom-Json).BackendState
+    try { (& $ts status --json 2>$null | Out-String | ConvertFrom-Json).BackendState } catch { $null }
 }
 # connect.ps1의 같은 이름 함수와 동일하게 유지한다: 서비스와 같은 폴더의 tailscale.exe를 찾는다.
 function Find-TailscaleExe {
@@ -47,27 +66,72 @@ function Find-TailscaleExe {
     return $null
 }
 
-$exitCode = 0
-New-Item -ItemType Directory -Force -Path $dir | Out-Null
-Set-Content -Path $logFile -Value "설치 시작 $(Get-Date -Format s)" -Encoding UTF8
+# SYSTEM이 실행할 스크립트를 두는 폴더를 만든다. 일반 사용자는 C:\ProgramData에 폴더를 만들 수 있으므로,
+# 미리 만들어 둔 폴더(소유자가 일반 사용자)나 링크를 그대로 쓰면 스크립트를 바꿔치기당할 수 있다.
+function Initialize-InstallDir {
+    $sidAdmins = 'S-1-5-32-544'; $sidSystem = 'S-1-5-18'; $sidUsers = 'S-1-5-32-545'
+    $trusted   = @($sidAdmins, $sidSystem)
+    $sid = { param($s) New-Object Security.Principal.SecurityIdentifier($s) }
 
+    $acl = New-Object System.Security.AccessControl.DirectorySecurity
+    $acl.SetOwner((& $sid $sidAdmins))
+    $acl.SetAccessRuleProtection($true, $false)
+    $inh = [Security.AccessControl.InheritanceFlags]'ContainerInherit,ObjectInherit'
+    $none = [Security.AccessControl.PropagationFlags]::None
+    foreach ($s in $sidSystem, $sidAdmins) {
+        $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule((& $sid $s), 'FullControl', $inh, $none, 'Allow')))
+    }
+    $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule((& $sid $sidUsers), 'ReadAndExecute', $inh, $none, 'Allow')))
+
+    if (Test-Path -LiteralPath $dir) {
+        $item = Get-Item -LiteralPath $dir -Force
+        if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+            throw "$dir 이(가) 링크(reparse point)입니다. 직접 확인해 지운 뒤 다시 설치하세요."
+        }
+        $owner = (Get-Acl -LiteralPath $dir).GetOwner([Security.Principal.SecurityIdentifier]).Value
+        if ($trusted -notcontains $owner) {
+            throw "$dir 의 소유자($owner)가 관리자나 SYSTEM이 아닙니다. 누가 만들었는지 확인해 지운 뒤 다시 설치하세요."
+        }
+        # 이 도구는 하위 폴더를 만들지 않는다. 폴더·링크가 있으면 따라 들어가지 않고 바로 의심 항목으로 본다.
+        $suspicious = Get-ChildItem -LiteralPath $dir -Force | Where-Object {
+            $_.PSIsContainer -or
+            ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -or
+            ($trusted -notcontains (Get-Acl -LiteralPath $_.FullName).GetOwner([Security.Principal.SecurityIdentifier]).Value)
+        }
+        if ($suspicious) {
+            throw "$dir 안에 관리자가 만들지 않은 항목이 있습니다: $(($suspicious | ForEach-Object Name) -join ', '). 확인해 지운 뒤 다시 설치하세요."
+        }
+        Set-Acl -LiteralPath $dir -AclObject $acl
+    } else {
+        # 처음부터 제한된 ACL로 만들어, 만든 직후 일반 사용자가 파일을 끼워 넣을 틈을 없앤다.
+        [void][IO.Directory]::CreateDirectory($dir, $acl)
+    }
+}
+
+$exitCode = 0
+$didDown  = $false
 $ts = Find-TailscaleExe
 try {
+    # 0) 설치 폴더 준비. install.log도 이 폴더에 쓰므로 가장 먼저 한다.
+    Initialize-InstallDir
+    Set-Content -LiteralPath $logFile -Value "설치 시작 $(Get-Date -Format s)" -Encoding UTF8
+    $script:logReady = $true
+    Write-Host "설치 시작 $(Get-Date -Format s)"
+    if ($script:resultWriter) { $script:resultWriter.WriteLine("설치 시작 $(Get-Date -Format s)") }
+
     if (-not $ts) { throw 'Tailscale을 찾지 못했습니다. Tailscale을 설치하고 로그인한 뒤 다시 실행하세요.' }
     Write-Report "Tailscale: $ts"
 
-    # 1) 스크립트 설치. SYSTEM이 실행하므로 일반 사용자는 수정하지 못하게 ACL을 제한한다.
-    $acl = New-Object System.Security.AccessControl.DirectorySecurity
-    $acl.SetAccessRuleProtection($true, $false)
-    $inh = 'ContainerInherit,ObjectInherit'
-    foreach ($id in 'NT AUTHORITY\SYSTEM', 'BUILTIN\Administrators') {
-        $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($id, 'FullControl', $inh, 'None', 'Allow')))
+    # 로그인되지 않은 상태에서 'tailscale up'은 인증을 무기한 기다리므로 미리 확인한다. Stopped(끊김)는 정상이다.
+    $state0 = Get-TsState
+    if (@('Running', 'Stopped', 'Starting') -notcontains $state0) {
+        throw "Tailscale 상태가 '$state0'입니다. Tailscale에 로그인한 뒤 다시 설치하세요."
     }
-    $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule('BUILTIN\Users', 'ReadAndExecute', $inh, 'None', 'Allow')))
-    Set-Acl -Path $dir -AclObject $acl
-    Copy-Item -Path (Join-Path $PSScriptRoot 'connect.ps1') -Destination $dir -Force
+
+    # 1) 스크립트 복사 (새 파일은 폴더의 제한된 ACL을 물려받는다)
+    Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'connect.ps1') -Destination $dir -Force
     # 한 줄 설치로 받은 경우 내려받은 폴더가 지워지므로 제거 스크립트도 함께 둔다.
-    Copy-Item -Path (Join-Path $PSScriptRoot 'uninstall.ps1') -Destination $dir -Force
+    Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'uninstall.ps1') -Destination $dir -Force
     Write-Report "스크립트 설치: $dir\connect.ps1, uninstall.ps1"
 
     # 2) Unattended 모드: 로그인 전·로그아웃 후에도 연결 유지.
@@ -77,7 +141,10 @@ try {
     $setCode = $LASTEXITCODE
     $ErrorActionPreference = 'Stop'
     if ($setCode -eq 0) { Write-Report 'Unattended 모드: 켜짐' }
-    else { Write-Report "경고: Unattended 모드를 켜지 못함 (종료 코드 $setCode) $($out.Trim())" }
+    else {
+        $exitCode = 1   # 로그인 전 부팅에서 연결되지 않을 수 있으므로 설치 실패로 본다
+        Write-Report "오류: Unattended 모드를 켜지 못함 (종료 코드 $setCode) $($out.Trim())"
+    }
 
     # 3) 이벤트 로그 원본: connect.ps1이 부팅 결과를 '응용 프로그램' 로그에 남긴다.
     if (-not [Diagnostics.EventLog]::SourceExists($eventSource)) {
@@ -107,6 +174,7 @@ try {
         Write-Report '검증 건너뜀 (-NoTest)'
     } else {
         & $ts down
+        $didDown = $true
         Start-Sleep -Seconds 2
         Write-Report "검증: down 후 상태 = $(Get-TsState)"
         $testStart = Get-Date
@@ -127,8 +195,13 @@ try {
     Write-Report "설치 오류: $($_.Exception.Message)"
 } finally {
     $ErrorActionPreference = 'Continue'
-    if ($ts -and (Get-TsState) -ne 'Running') { & $ts up 2>&1 | Out-Null }   # 어떤 경우든 연결은 복구
+    # 검증 때문에 직접 끊었는데 아직 연결되지 않았으면 복구한다. 응답이 없을 때를 대비해 30초만 기다린다.
+    if ($didDown -and (Get-TsState) -ne 'Running') {
+        $p = Start-Process -FilePath $ts -ArgumentList 'up' -NoNewWindow -PassThru
+        if (-not $p.WaitForExit(30000)) { $p.Kill() }
+    }
     Write-Report "최종 상태: $(Get-TsState)"
     Write-Report "완료 (종료 코드 $exitCode)"
+    if ($script:resultWriter) { $script:resultWriter.Dispose() }
 }
 exit $exitCode

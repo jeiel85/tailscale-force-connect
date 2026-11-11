@@ -32,7 +32,7 @@ Tailscale Windows 클라이언트 **1.84 이상**에는 비슷한 목적의 [시
 
 ## 설치
 
-필요한 것: Windows 10/11, Tailscale에 로그인한 상태, 관리자 권한. Tailscale 설치 위치는 서비스 등록 정보에서 찾으므로 기본 경로가 아니어도 됩니다.
+필요한 것: Windows 10/11, Tailscale에 로그인한 상태(로그인되어 있지 않으면 설치가 멈추지 않고 바로 실패합니다), 관리자 권한. Tailscale 설치 위치는 서비스 등록 정보에서 찾으므로 기본 경로가 아니어도 됩니다.
 세 가지 방법 모두 설치 중에 UAC 창이 한 번 뜹니다.
 
 **방법 1. 한 줄로 설치** — cmd나 PowerShell에 붙여 넣습니다.
@@ -63,7 +63,9 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1
 
 - 설치가 끝나면 **몇 초 동안 일부러 연결을 끊었다가** 예약 작업으로 다시 연결되는지 확인합니다.
   그 PC에 Tailscale로 원격 접속해 있다면 이 확인을 건너뛰세요.
-  - 방법 1: cmd에서 `set TFC_NOTEST=1 && powershell -c "irm https://jeiel85.github.io/tailscale-force-connect/get.ps1 | iex"`
+  - 방법 1 (cmd): `set TFC_NOTEST=1 && powershell -c "irm https://jeiel85.github.io/tailscale-force-connect/get.ps1 | iex"`
+  - 방법 1 (PowerShell): `$env:TFC_NOTEST=1; irm https://jeiel85.github.io/tailscale-force-connect/get.ps1 | iex`
+    (PowerShell에서는 `set`이 환경 변수를 만들지 않으므로 cmd 줄을 그대로 붙여 넣지 마세요. 값은 그 창을 닫을 때까지 남습니다.)
   - 방법 2: `install.cmd -NoTest`
   - 방법 3: `install.ps1 -NoTest`
 - 마지막 줄이 `완료 (종료 코드 0)`이고 그 앞에 `검증 성공`이 있으면 설치가 끝난 것입니다. 한 줄 설치는 실패하면 오류를 출력하고 0이 아닌 종료 코드로 끝납니다.
@@ -129,6 +131,9 @@ tailscale status
 - **`.ps1`은 UTF-8 BOM으로 저장합니다.** 예약 작업은 Windows PowerShell 5.1로 실행되는데, BOM이 없으면 한글을 CP949로 읽어 깨집니다.
 - **함수 이름을 `R`처럼 짧게 짓지 마세요.** `r`은 `Invoke-History`의 기본 별칭이라 같은 이름의 함수보다 먼저 호출됩니다.
   초기 버전의 설치가 조용히 멈춘 원인이었습니다.
+- **설치 폴더를 믿기 전에 확인합니다.** 일반 사용자도 `C:\ProgramData`에 폴더를 만들 수 있으므로, 폴더가 이미 있으면
+  링크가 아닌지, 폴더와 그 안 파일의 소유자가 Administrators나 SYSTEM인지 확인하고 아니면 설치를 중단합니다.
+  새로 만들 때는 처음부터 제한된 ACL로 만듭니다. 제거할 때는 하위 폴더나 링크를 따라 들어가지 않습니다.
 - **Unattended 상태를 `tailscale debug prefs`로 읽지 않습니다.** debug 출력은 안정된 API가 아니므로, 이미 켜져 있어도
   `tailscale set --unattended=true`를 다시 실행합니다(같은 값을 다시 쓸 뿐입니다).
 - `Start-Process -PassThru`로 받은 프로세스는 `WaitForExit(timeout)`을 부르기 전에 `$p.Handle`을 한 번 읽어 두어야
