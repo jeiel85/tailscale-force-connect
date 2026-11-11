@@ -1,0 +1,414 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>tailscale-force-connect</title>
+<meta name="description" content="Windows에서 Tailscale을 끊어 둔 채로 재부팅해도 부팅할 때마다 다시 연결합니다. PowerShell 스크립트와 예약 작업만 씁니다.">
+<meta property="og:title" content="tailscale-force-connect">
+<meta property="og:description" content="꺼 둔 채로 재부팅해도, 다시 연결됩니다. Windows용 Tailscale 부팅 시 자동 재연결.">
+<meta property="og:type" content="website">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='9' fill='%231B8F69'/%3E%3Ccircle cx='16' cy='16' r='14' fill='none' stroke='%2314202B' stroke-width='3'/%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Black+Han+Sans&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans+KR:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #DDE3E8;
+    --panel: #F7F9FA;
+    --ink: #14202B;
+    --muted: #4D5B68;
+    --rule: #A9B4BE;
+    --amber: #D98E1F;
+    --green: #1B8F69;
+    --screen: #101820;
+    --screen-ink: #CFE3D8;
+    --screen-dim: #6F8A7E;
+    --focus: #2F6FD6;
+    color-scheme: light;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #11181E; --panel: #1A232B; --ink: #E4EAEF; --muted: #9AA8B4; --rule: #34424E;
+      --amber: #F0A63A; --green: #3CC293; --screen: #0A0F14; --screen-ink: #CFE3D8; --screen-dim: #5E7469;
+      --focus: #7FA8F0; color-scheme: dark;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #11181E; --panel: #1A232B; --ink: #E4EAEF; --muted: #9AA8B4; --rule: #34424E;
+    --amber: #F0A63A; --green: #3CC293; --screen: #0A0F14; --screen-ink: #CFE3D8; --screen-dim: #5E7469;
+    --focus: #7FA8F0; color-scheme: dark;
+  }
+
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font: 400 17px/1.7 "IBM Plex Sans KR", system-ui, sans-serif;
+    word-break: keep-all;
+    overflow-wrap: anywhere;
+  }
+  a { color: inherit; text-underline-offset: 3px; }
+  :focus-visible { outline: 3px solid var(--focus); outline-offset: 3px; border-radius: 4px; }
+  code, pre, .mono { font-family: "IBM Plex Mono", ui-monospace, monospace; }
+  code { font-size: .92em; }
+
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 0 24px; }
+
+  header.top { border-bottom: 1px solid var(--rule); }
+  header.top .wrap { display: flex; align-items: center; justify-content: space-between; height: 60px; gap: 16px; }
+  .brand { font-family: "IBM Plex Mono", monospace; font-weight: 500; font-size: 15px; text-decoration: none; display: inline-flex; align-items: center; gap: 10px; }
+  .brand-dot { width: 10px; height: 10px; border-radius: 50%; background: var(--green); box-shadow: 0 0 0 3px color-mix(in srgb, var(--green) 25%, transparent); }
+  .top-link { font-size: 15px; font-weight: 500; }
+
+  /* ---------- hero ---------- */
+  .hero { display: grid; grid-template-columns: 1.05fr 1fr; gap: 56px; align-items: center; padding-block: 72px 88px; }
+  .hero h1 {
+    font-family: "Black Han Sans", "IBM Plex Sans KR", sans-serif;
+    font-weight: 400;
+    font-size: clamp(2.5rem, 5.6vw, 4.3rem);
+    line-height: 1.12;
+    letter-spacing: -0.01em;
+    margin: 0 0 24px;
+  }
+  .hero h1 .again { color: var(--green); }
+  .lede { font-size: 18px; color: var(--muted); margin: 0 0 28px; max-width: 34em; }
+  .lede strong { color: var(--ink); font-weight: 500; }
+  .hero-actions { display: flex; flex-wrap: wrap; gap: 12px; }
+  .btn {
+    font: 500 16px/1 "IBM Plex Sans KR", sans-serif;
+    display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+    min-height: 46px; padding: 0 20px; border-radius: 10px;
+    border: 1.5px solid var(--ink); background: var(--ink); color: var(--bg);
+    text-decoration: none; cursor: pointer;
+  }
+  .btn.ghost { background: transparent; color: var(--ink); }
+
+  /* ---------- signature: device panel ---------- */
+  .device {
+    background: var(--panel);
+    border: 1.5px solid var(--rule);
+    border-radius: 18px;
+    padding: 20px;
+    box-shadow: 0 1px 0 var(--rule), 0 24px 48px -28px rgba(20, 32, 43, .45);
+  }
+  .device-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 16px; }
+  .device-name { font-family: "IBM Plex Mono", monospace; font-size: 13px; color: var(--muted); letter-spacing: .04em; }
+  .status { display: inline-flex; align-items: center; gap: 10px; font-weight: 500; font-size: 15px; }
+  .led { width: 14px; height: 14px; border-radius: 50%; background: var(--green); box-shadow: 0 0 10px 1px var(--green); transition: background .25s, box-shadow .25s; }
+  .led[data-state="stopped"] { background: var(--amber); box-shadow: 0 0 10px 1px var(--amber); }
+  .led[data-state="off"] { background: var(--rule); box-shadow: none; }
+  .led[data-state="booting"] { background: var(--amber); box-shadow: none; animation: blink .5s steps(2) infinite; }
+  @keyframes blink { 50% { opacity: .25; } }
+
+  .screen {
+    background: var(--screen);
+    color: var(--screen-ink);
+    border-radius: 10px;
+    padding: 14px 16px;
+    height: 216px;
+    overflow: hidden;
+    font: 400 13.5px/1.75 "IBM Plex Mono", monospace;
+    position: relative;
+    transition: filter .35s, opacity .35s;
+  }
+  .screen.off { opacity: .15; filter: brightness(.3); }
+  .screen ol { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; justify-content: flex-end; min-height: 100%; }
+  .screen li { white-space: pre-wrap; }
+  .screen .t { color: var(--screen-dim); }
+  .screen .ok { color: #6FE0AE; }
+  .screen .warn { color: #F3C077; }
+
+  .controls { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 14px; }
+  .ctl {
+    font: 500 15px/1.2 "IBM Plex Sans KR", sans-serif;
+    min-height: 48px; padding: 10px 14px; border-radius: 10px; cursor: pointer;
+    border: 1.5px solid var(--rule); background: var(--bg); color: var(--ink);
+  }
+  .ctl.reboot { background: var(--ink); color: var(--panel); border-color: var(--ink); }
+  .ctl:disabled { opacity: .45; cursor: not-allowed; }
+  .install-toggle { display: flex; align-items: center; gap: 10px; margin-top: 14px; font-size: 14.5px; color: var(--muted); cursor: pointer; }
+  .install-toggle input { width: 18px; height: 18px; accent-color: var(--green); margin: 0; }
+  .device-note { margin: 10px 0 0; font-size: 13px; color: var(--muted); }
+
+  /* ---------- sections ---------- */
+  section.block { border-top: 1px solid var(--rule); padding: 64px 0; }
+  .block-grid { display: grid; grid-template-columns: 260px 1fr; gap: 40px; }
+  .block h2 { font-size: 22px; font-weight: 700; line-height: 1.35; margin: 0; }
+  .block .side-note { color: var(--muted); font-size: 15px; margin: 10px 0 0; }
+
+  .steps { list-style: none; margin: 0; padding: 0; counter-reset: step; display: grid; gap: 22px; }
+  .steps > li { counter-increment: step; display: grid; grid-template-columns: 34px 1fr; gap: 14px; }
+  .steps > li::before {
+    content: counter(step);
+    font: 500 14px/32px "IBM Plex Mono", monospace;
+    width: 32px; height: 32px; text-align: center; border-radius: 50%;
+    border: 1.5px solid var(--ink);
+  }
+  .steps p { margin: 2px 0 10px; }
+  .cmd { display: flex; align-items: stretch; background: var(--screen); color: var(--screen-ink); border-radius: 10px; overflow: hidden; }
+  .cmd pre { margin: 0; padding: 12px 16px; flex: 1; overflow-x: auto; font-size: 14px; line-height: 1.6; }
+  .copy {
+    font: 500 13px/1 "IBM Plex Sans KR", sans-serif; flex: none;
+    background: transparent; color: var(--screen-ink); border: 0; border-left: 1px solid #2A3844;
+    padding: 0 16px; cursor: pointer; min-width: 72px;
+  }
+  .copy:hover { background: #1B2731; }
+  .hint { font-size: 15px; color: var(--muted); margin: 10px 0 0; }
+
+  .compare { width: 100%; border-collapse: collapse; font-size: 15.5px; }
+  .compare th, .compare td { text-align: left; vertical-align: top; padding: 14px 12px; border-bottom: 1px solid var(--rule); }
+  .compare thead th { font-size: 13px; font-weight: 500; color: var(--muted); letter-spacing: .03em; border-bottom: 1.5px solid var(--ink); }
+  .compare tbody th { font-weight: 500; white-space: nowrap; }
+  .compare tr.mine th, .compare tr.mine td { background: color-mix(in srgb, var(--green) 10%, transparent); }
+  .compare th code { overflow-wrap: normal; word-break: normal; }
+  .compare thead th, .compare .yes, .compare .no { white-space: nowrap; }
+  .yes { color: var(--green); font-weight: 700; }
+  .no { color: var(--muted); font-weight: 700; }
+  .table-scroll { overflow-x: auto; }
+
+  .facts { margin: 0; display: grid; gap: 18px; }
+  .facts div { display: grid; grid-template-columns: 200px 1fr; gap: 16px; padding-bottom: 18px; border-bottom: 1px solid var(--rule); }
+  .facts dt { font-family: "IBM Plex Mono", monospace; font-size: 14px; font-weight: 500; }
+  .facts dd { margin: 0; color: var(--muted); font-size: 15.5px; }
+
+  footer { border-top: 1px solid var(--rule); padding: 32px 0 48px; font-size: 14px; color: var(--muted); }
+  footer .wrap { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 12px; }
+
+  @media (max-width: 860px) {
+    .hero { grid-template-columns: 1fr; gap: 40px; padding-block: 48px 64px; }
+    .block-grid { grid-template-columns: 1fr; gap: 20px; }
+    .facts div { grid-template-columns: 1fr; gap: 4px; }
+  }
+  @media (max-width: 480px) {
+    .wrap { padding: 0 16px; }
+    body { font-size: 16px; }
+    .device { padding: 14px; }
+    .screen { font-size: 12.5px; height: 232px; }
+    .compare tbody th { white-space: normal; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation: none !important; transition: none !important; }
+  }
+</style>
+</head>
+<body>
+
+<header class="top">
+  <div class="wrap">
+    <a class="brand" href="./"><span class="brand-dot" aria-hidden="true"></span>tailscale-force-connect</a>
+    <a class="top-link" href="https://github.com/jeiel85/tailscale-force-connect">GitHub</a>
+  </div>
+</header>
+
+<main>
+  <div class="wrap hero">
+    <div>
+      <h1>꺼 둔 채로 재부팅해도,<br><span class="again">다시 연결됩니다.</span></h1>
+      <p class="lede">Windows에서 Tailscale을 <strong>Disconnect</strong> 해 둔 채로 재부팅하면, 끊긴 상태 그대로 켜집니다.
+        이 도구는 부팅할 때마다 SYSTEM 권한으로 다시 연결합니다. 로그인하지 않아도 되고, 평소에 직접 끊는 것도 지금처럼 할 수 있습니다.</p>
+      <div class="hero-actions">
+        <a class="btn" href="#install">설치 방법</a>
+        <a class="btn ghost" href="https://github.com/jeiel85/tailscale-force-connect">소스 보기</a>
+      </div>
+    </div>
+
+    <div class="device" aria-labelledby="demo-title">
+      <div class="device-head">
+        <span class="device-name" id="demo-title">직접 해 보기 · 이 PC</span>
+        <span class="status"><span class="led" id="led" data-state="running" aria-hidden="true"></span><span id="status-text">연결됨</span></span>
+      </div>
+      <div class="screen" id="screen">
+        <ol id="log" aria-live="polite" aria-label="부팅 로그"></ol>
+      </div>
+      <div class="controls">
+        <button type="button" class="ctl" id="btn-toggle">연결 끊기</button>
+        <button type="button" class="ctl reboot" id="btn-reboot">재부팅</button>
+      </div>
+      <label class="install-toggle"><input type="checkbox" id="chk-installed" checked> tailscale-force-connect 설치됨</label>
+      <p class="device-note">실제 <span class="mono">connect.log</span> 형식을 그대로 흉내 낸 시뮬레이션입니다. 20초 대기는 줄여서 보여 줍니다.</p>
+    </div>
+  </div>
+
+  <section class="block" id="install" aria-labelledby="h-install">
+    <div class="wrap block-grid">
+      <div>
+        <h2 id="h-install">설치</h2>
+        <p class="side-note">Windows 10/11, Tailscale에 로그인된 상태, 관리자 권한이 필요합니다.</p>
+      </div>
+      <ol class="steps">
+        <li>
+          <div>
+            <p>저장소를 내려받습니다.</p>
+            <div class="cmd"><pre><code>git clone https://github.com/jeiel85/tailscale-force-connect.git
+cd tailscale-force-connect</code></pre><button type="button" class="copy">복사</button></div>
+          </div>
+        </li>
+        <li>
+          <div>
+            <p>설치 스크립트를 실행합니다. 관리자 권한이 아니면 UAC 창이 뜹니다.</p>
+            <div class="cmd"><pre><code>powershell -ExecutionPolicy Bypass -File .\install.ps1</code></pre><button type="button" class="copy">복사</button></div>
+            <p class="hint">설치가 끝나면 몇 초 동안 일부러 연결을 끊었다가 다시 연결되는지 확인합니다. 그 PC에 Tailscale로 원격 접속 중이라면 끝에 <code>-NoTest</code>를 붙이세요.</p>
+          </div>
+        </li>
+        <li>
+          <div>
+            <p>출력 끝에 <code>검증 성공</code>과 <code>완료 (종료 코드 0)</code>가 보이면 설치가 끝난 것입니다.</p>
+            <p class="hint">관리 콘솔에서 그 기기의 <strong>Disable key expiry</strong>도 켜 두세요. 키가 만료되면 다시 로그인해야 해서 자동 연결이 되지 않습니다.</p>
+          </div>
+        </li>
+      </ol>
+    </div>
+  </section>
+
+  <section class="block" aria-labelledby="h-compare">
+    <div class="wrap block-grid">
+      <div>
+        <h2 id="h-compare">공식 기능과 비교</h2>
+        <p class="side-note">Tailscale 1.84 이상은 비슷한 시스템 정책을 제공합니다. 관리하는 기기가 많다면 공식 정책을 먼저 검토하세요.</p>
+      </div>
+      <div class="table-scroll">
+        <table class="compare">
+          <thead><tr><th scope="col">방법</th><th scope="col">직접 끊기</th><th scope="col">다시 연결되는 때</th></tr></thead>
+          <tbody>
+            <tr><th scope="row"><code>AlwaysOn.<wbr>Enabled</code></th><td class="no">불가</td><td>끊을 수 없게 막습니다. <code>OverrideWithReason</code>을 켜면 사유를 적고 끊을 수 있습니다.</td></tr>
+            <tr><th scope="row"><code>Reconnect<wbr>After</code></th><td class="yes">가능</td><td>정한 시간(예: <code>30m</code>)이 지나면, 재부팅 여부와 관계없이 다시 연결합니다.</td></tr>
+            <tr class="mine"><th scope="row">이 도구</th><td class="yes">가능</td><td>부팅할 때만 다시 연결합니다. 그 전까지는 끊은 상태가 유지됩니다.</td></tr>
+          </tbody>
+        </table>
+        <p class="hint">공식 문서에는 정책이 재부팅 때 어떻게 동작하는지 따로 적혀 있지 않습니다. <a href="https://tailscale.com/docs/features/tailscale-system-policies">Tailscale 시스템 정책 문서</a></p>
+      </div>
+    </div>
+  </section>
+
+  <section class="block" aria-labelledby="h-what">
+    <div class="wrap block-grid">
+      <div>
+        <h2 id="h-what">설치되는 것</h2>
+        <p class="side-note">지우려면 <code>uninstall.ps1</code>을 실행합니다. Tailscale 설정은 그대로 남습니다.</p>
+      </div>
+      <dl class="facts">
+        <div><dt>예약 작업</dt><dd><code>Tailscale Auto Connect</code>: 부팅하고 20초 뒤 SYSTEM으로 실행합니다. 연결될 때까지 10초 간격으로 최대 5분 동안 <code>tailscale up</code>을 시도합니다.</dd></div>
+        <div><dt>스크립트 폴더</dt><dd><code>C:\ProgramData\TailscaleAutoConnect\</code>: 관리자만 고칠 수 있고, 일반 사용자는 읽기만 할 수 있습니다.</dd></div>
+        <div><dt>로그</dt><dd>같은 폴더의 <code>connect.log</code>에 부팅할 때마다 결과가 남습니다. 로그인이 필요한 상황(키 만료)도 여기에 기록됩니다.</dd></div>
+        <div><dt>Unattended 모드</dt><dd>꺼져 있으면 켭니다. 그래야 Windows에 로그인하기 전에도 연결됩니다.</dd></div>
+        <div><dt>기존 설정</dt><dd>플래그 없이 <code>tailscale up</code>만 실행하므로 exit node, 경로 수락 같은 설정은 바뀌지 않습니다.</dd></div>
+      </dl>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <span>Tailscale Inc.와 관계없는 비공식 도구입니다. MIT 라이선스.</span>
+    <a href="https://github.com/jeiel85/tailscale-force-connect">github.com/jeiel85/tailscale-force-connect</a>
+  </div>
+</footer>
+
+<script>
+(function () {
+  var reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var led = document.getElementById('led');
+  var statusText = document.getElementById('status-text');
+  var screen = document.getElementById('screen');
+  var log = document.getElementById('log');
+  var btnToggle = document.getElementById('btn-toggle');
+  var btnReboot = document.getElementById('btn-reboot');
+  var chk = document.getElementById('chk-installed');
+
+  var connected = true;
+  var busy = false;
+  var clock = new Date(2026, 10, 11, 14, 46, 0);
+
+  function stamp(addSec) {
+    clock = new Date(clock.getTime() + (addSec || 0) * 1000);
+    function p(n) { return n < 10 ? '0' + n : '' + n; }
+    return p(clock.getHours()) + ':' + p(clock.getMinutes()) + ':' + p(clock.getSeconds());
+  }
+  function line(text, cls, addSec) {
+    var li = document.createElement('li');
+    var t = document.createElement('span');
+    t.className = 't';
+    t.textContent = stamp(addSec) + '  ';
+    var m = document.createElement('span');
+    if (cls) m.className = cls;
+    m.textContent = text;
+    li.appendChild(t); li.appendChild(m);
+    log.appendChild(li);
+    while (log.children.length > 9) log.removeChild(log.firstChild);
+  }
+  function setState(s) {
+    led.setAttribute('data-state', s);
+    statusText.textContent = { running: '연결됨', stopped: '끊김', off: '전원 꺼짐', booting: '부팅 중' }[s];
+  }
+  function render() {
+    btnToggle.textContent = connected ? '연결 끊기' : '연결하기';
+    btnToggle.disabled = busy; btnReboot.disabled = busy; chk.disabled = busy;
+  }
+  function wait(ms) { return new Promise(function (r) { setTimeout(r, reduce ? 0 : ms); }); }
+
+  btnToggle.addEventListener('click', function () {
+    connected = !connected;
+    if (connected) { setState('running'); line('사용자가 Connect → 연결됨', 'ok', 3); }
+    else { setState('stopped'); line('사용자가 Disconnect → WantRunning=false', 'warn', 3); }
+    render();
+  });
+
+  btnReboot.addEventListener('click', function () {
+    busy = true; render();
+    line('재부팅', null, 2);
+    setState('off');
+    screen.classList.add('off');
+    wait(900).then(function () {
+      log.innerHTML = '';
+      screen.classList.remove('off');
+      setState('booting');
+      line('Windows 시작 · Tailscale 서비스 실행', null, 25);
+      if (connected) return wait(700).then(function () { line('마지막 상태 기억 → 연결됨', 'ok', 4); });
+      return wait(700).then(function () {
+        line('마지막 상태 기억 → 끊긴 채로 시작', 'warn', 4);
+        if (!chk.checked) return;
+        return wait(900).then(function () {
+          line('--- 시작 --- (예약 작업, +20초)', null, 20);
+          return wait(700);
+        }).then(function () {
+          line("상태 'Stopped' -> tailscale up (시도 1)", null, 0);
+          return wait(1100);
+        }).then(function () {
+          connected = true;
+          line('연결됨 (시도 2)', 'ok', 11);
+        });
+      });
+    }).then(function () {
+      if (!connected && !chk.checked) line('예약 작업 없음 → 끊긴 상태 유지', 'warn', 1);
+      setState(connected ? 'running' : 'stopped');
+      busy = false; render();
+    });
+  });
+
+  chk.addEventListener('change', function () {
+    line(chk.checked ? '예약 작업 Tailscale Auto Connect 등록' : '예약 작업 삭제', null, 5);
+  });
+
+  // 초기 로그
+  line('Windows 시작 · Tailscale 서비스 실행', null, 0);
+  line('연결됨', 'ok', 3);
+  line('먼저 [연결 끊기], 그다음 [재부팅]을 눌러 보세요', null, 1);
+  render();
+
+  // 명령어 복사
+  Array.prototype.forEach.call(document.querySelectorAll('.copy'), function (b) {
+    b.addEventListener('click', function () {
+      var text = b.parentNode.querySelector('code').textContent;
+      function done(msg) { b.textContent = msg; setTimeout(function () { b.textContent = '복사'; }, 1600); }
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(function () { done('복사됨'); }, function () { done('직접 선택해 복사'); });
+      } else { done('직접 선택해 복사'); }
+    });
+  });
+})();
+</script>
+</body>
+</html>

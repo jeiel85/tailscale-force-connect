@@ -1,0 +1,2 @@
+# PowerShell 5.1용 스크립트: CRLF로 체크아웃 (UTF-8 BOM은 git이 그대로 보존)
+*.ps1 text eol=crlf
