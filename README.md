@@ -32,7 +32,7 @@ Tailscale Windows 클라이언트 **1.84 이상**에는 비슷한 목적의 [시
 
 ## 설치
 
-필요한 것: Windows 10/11, Tailscale(기본 경로 `C:\Program Files\Tailscale\`)에 로그인한 상태, 관리자 권한.
+필요한 것: Windows 10/11, Tailscale에 로그인한 상태, 관리자 권한. Tailscale 설치 위치는 서비스 등록 정보에서 찾으므로 기본 경로가 아니어도 됩니다.
 세 가지 방법 모두 설치 중에 UAC 창이 한 번 뜹니다.
 
 **방법 1. 한 줄로 설치** — cmd나 PowerShell에 붙여 넣습니다.
@@ -62,30 +62,35 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1
 설치 결과:
 
 - 설치가 끝나면 **몇 초 동안 일부러 연결을 끊었다가** 예약 작업으로 다시 연결되는지 확인합니다.
-  그 PC에 Tailscale로 원격 접속해 있다면 이 확인을 건너뛰세요. 방법 2는 `install.cmd -NoTest`, 방법 3은 `install.ps1 -NoTest`로 실행하면 됩니다.
-- 마지막 줄이 `완료 (종료 코드 0)`이고 그 앞에 `검증 성공`이 있으면 설치가 끝난 것입니다.
-- Unattended 모드(로그인 전에도 연결 유지)가 꺼져 있으면 켭니다.
+  그 PC에 Tailscale로 원격 접속해 있다면 이 확인을 건너뛰세요.
+  - 방법 1: cmd에서 `set TFC_NOTEST=1 && powershell -c "irm https://jeiel85.github.io/tailscale-force-connect/get.ps1 | iex"`
+  - 방법 2: `install.cmd -NoTest`
+  - 방법 3: `install.ps1 -NoTest`
+- 마지막 줄이 `완료 (종료 코드 0)`이고 그 앞에 `검증 성공`이 있으면 설치가 끝난 것입니다. 한 줄 설치는 실패하면 오류를 출력하고 0이 아닌 종료 코드로 끝납니다.
+- Unattended 모드(로그인 전에도 연결 유지)를 켭니다.
 
 > **Windows 빠른 시작을 확인하세요.** 빠른 시작이 켜져 있으면(Windows 기본값) **일반 종료 후 전원을 켤 때**는 완전 부팅이 아니라
 > 최대 절전 복귀가 되어 이 작업이 실행되지 않습니다. 재시작과 정전 뒤 부팅에서는 동작합니다. 설치 스크립트가 빠른 시작이 켜진 것을 감지하면 경고를 출력합니다.
 > 항상 동작하게 하려면 제어판 → 전원 옵션 → 전원 단추 작동 설정에서 **빠른 시작 켜기**를 끄세요.
 
 **권장:** [관리 콘솔](https://login.tailscale.com/admin/machines)에서 그 기기의 **Disable key expiry**를 켜세요.
-키가 만료되면(기본 180일) 다시 로그인해야 하므로 자동 연결이 되지 않습니다. 이때는 `connect.log`에 `로그인이 필요함`이 남습니다.
+키가 만료되면(기본 180일) 다시 로그인해야 하므로 자동 연결이 되지 않습니다. 이때는 `connect.log`와 이벤트 로그에 `로그인이 필요함`이 남습니다.
 
 ## 구성
 
 | 파일 | 역할 |
 |---|---|
-| `connect.ps1` | 부팅 때 실행되는 본체입니다. 서비스가 꺼져 있으면 켜고, 연결될 때까지 10초 간격으로 최대 30회(약 5분) `tailscale up`을 실행합니다. |
-| `install.ps1` | `connect.ps1`을 `C:\ProgramData\TailscaleAutoConnect\`에 복사하고, Unattended 모드를 켜고, 예약 작업을 등록한 뒤 동작을 확인합니다. |
-| `uninstall.ps1` | 예약 작업과 설치 폴더를 지웁니다. Tailscale 본체와 Unattended 설정은 건드리지 않습니다. |
+| `connect.ps1` | 부팅 때 실행되는 본체입니다. 서비스가 꺼져 있으면 켜고, 연결될 때까지 최대 10분 동안 10초 간격으로 `tailscale up`을 실행합니다. 결과는 로그 파일과 이벤트 로그에 남깁니다. |
+| `install.ps1` | `connect.ps1`을 `C:\ProgramData\TailscaleAutoConnect\`에 복사하고, Unattended 모드를 켜고, 이벤트 로그 원본과 예약 작업을 등록한 뒤 동작을 확인합니다. |
+| `uninstall.ps1` | 예약 작업, 설치 폴더, 이벤트 로그 원본을 지우고 결과를 보여 줍니다. Tailscale 본체와 Unattended 설정은 건드리지 않습니다. |
 | `install.cmd`, `uninstall.cmd` | 더블클릭용 실행 파일입니다. 같은 폴더의 `.ps1`을 실행합니다. |
-| `docs/get.ps1` | 한 줄 설치용 스크립트입니다. GitHub Pages로 배포되며, 릴리스 zip에는 들어가지 않습니다. |
+| `docs/get.ps1`, `docs/remove.ps1` | 한 줄 설치·제거용 스크립트입니다. GitHub Pages로 배포되며, 릴리스 zip에는 들어가지 않습니다. |
 
 설치되는 것:
 
-- 예약 작업 **`Tailscale Auto Connect`**: 시작 시 20초 뒤에 SYSTEM 계정으로 실행되며, 실행 시간은 최대 10분입니다.
+- 예약 작업 **`Tailscale Auto Connect`**: 시작 시 20초 뒤에 SYSTEM 계정으로 실행되며, 실행 시간은 최대 15분입니다.
+- 이벤트 로그 원본 **`TailscaleForceConnect`**(응용 프로그램 로그): 부팅할 때마다 결과를 남깁니다. ID `1000` 연결됨(정보),
+  `1001` 10분 안에 연결 실패, `1002` 로그인 필요, `1003` `tailscale.exe` 없음(이상 오류).
 - 폴더 `C:\ProgramData\TailscaleAutoConnect\`: SYSTEM과 Administrators만 쓸 수 있고 Users는 읽기만 할 수 있습니다.
   SYSTEM이 실행하는 스크립트를 일반 사용자가 바꾸지 못하게 하려는 설정입니다.
   - `connect.ps1`
@@ -100,15 +105,19 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1
 ```powershell
 Get-ScheduledTask -TaskName 'Tailscale Auto Connect' | Get-ScheduledTaskInfo   # LastTaskResult 0 = 성공
 Get-Content C:\ProgramData\TailscaleAutoConnect\connect.log -Tail 20
+Get-EventLog -LogName Application -Source TailscaleForceConnect -Newest 5   # 부팅 결과 기록
 tailscale status
 ```
+
+이벤트 뷰어 → Windows 로그 → 응용 프로그램에서 원본 `TailscaleForceConnect`로 필터링해도 볼 수 있습니다.
+오류 이벤트(1001~1003)에 작업을 연결하면 실패 알림을 받도록 설정할 수 있습니다.
 
 `connect.ps1` 종료 코드:
 
 | 코드 | 의미 |
 |---|---|
 | `0` | 연결됨 |
-| `1` | 5분 안에 연결하지 못함 |
+| `1` | 10분 안에 연결하지 못함 |
 | `2` | 로그인이 필요함(키 만료 등) |
 | `3` | `tailscale.exe`가 없음 |
 
@@ -120,12 +129,24 @@ tailscale status
 - **`.ps1`은 UTF-8 BOM으로 저장합니다.** 예약 작업은 Windows PowerShell 5.1로 실행되는데, BOM이 없으면 한글을 CP949로 읽어 깨집니다.
 - **함수 이름을 `R`처럼 짧게 짓지 마세요.** `r`은 `Invoke-History`의 기본 별칭이라 같은 이름의 함수보다 먼저 호출됩니다.
   초기 버전의 설치가 조용히 멈춘 원인이었습니다.
+- **Unattended 상태를 `tailscale debug prefs`로 읽지 않습니다.** debug 출력은 안정된 API가 아니므로, 이미 켜져 있어도
+  `tailscale set --unattended=true`를 다시 실행합니다(같은 값을 다시 쓸 뿐입니다).
 - `Start-Process -PassThru`로 받은 프로세스는 `WaitForExit(timeout)`을 부르기 전에 `$p.Handle`을 한 번 읽어 두어야
   `ExitCode`를 얻을 수 있습니다.
 
 ## 제거
 
-받은 폴더에서 `uninstall.cmd`를 더블클릭하거나, 어느 방법으로 설치했든 아래 명령을 실행합니다.
+어느 방법으로 설치했든 아래 한 줄을 cmd나 PowerShell에 붙여 넣으면 됩니다. UAC 창이 한 번 뜹니다.
+
+```bat
+powershell -c "irm https://jeiel85.github.io/tailscale-force-connect/remove.ps1 | iex"
+```
+
+[`remove.ps1`](docs/remove.ps1)은 설치할 때 복사해 둔 `C:\ProgramData\TailscaleAutoConnect\uninstall.ps1`을 실행합니다.
+그 파일이 없으면 최신 릴리스 zip을 받아 그 안의 `uninstall.ps1`을 실행합니다.
+예약 작업, 설치 폴더, 이벤트 로그 원본을 지우고 결과를 보여 줍니다. Tailscale 설정은 그대로 남습니다.
+
+인터넷을 쓰지 않으려면 zip이나 git으로 받은 폴더에서 `uninstall.cmd`를 더블클릭하거나 아래 명령을 실행하세요.
 
 ```bat
 powershell -ExecutionPolicy Bypass -File C:\ProgramData\TailscaleAutoConnect\uninstall.ps1
