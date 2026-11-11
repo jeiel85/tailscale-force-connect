@@ -23,6 +23,7 @@ if (-not $isAdmin) {
 }
 
 $taskName    = 'Tailscale Auto Connect'
+$watchTask   = 'Tailscale Auto Reconnect'
 $dir         = 'C:\ProgramData\TailscaleAutoConnect'
 $eventSource = 'TailscaleForceConnect'
 
@@ -51,20 +52,10 @@ try {
     } else {
         Write-Report "예약 작업 없음: $taskName"
     }
-
-    # 이 도구가 설정한 ReconnectAfter 정책만 지운다(표시 파일의 값과 같을 때). 조직이 정한 값은 건드리지 않는다.
-    $policyKey  = 'HKLM:\SOFTWARE\Policies\Tailscale'
-    $policyMark = Join-Path $dir 'reconnect-after.set'
-    $markItem   = Get-Item -LiteralPath $policyMark -Force -ErrorAction SilentlyContinue
-    if ($markItem -and -not ($markItem.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
-        $ours    = (Get-Content -LiteralPath $policyMark -TotalCount 1).Trim()
-        $current = (Get-ItemProperty -Path $policyKey -Name ReconnectAfter -ErrorAction SilentlyContinue).ReconnectAfter
-        if ($current -and $current -eq $ours) {
-            Remove-ItemProperty -Path $policyKey -Name ReconnectAfter
-            Write-Report "자동 재연결 정책 삭제: ReconnectAfter=$ours"
-        } elseif ($current) {
-            Write-Report "자동 재연결 정책은 다른 값($current)으로 바뀌어 있어 그대로 둠"
-        }
+    if (Get-ScheduledTask -TaskName $watchTask -ErrorAction SilentlyContinue) {
+        Stop-ScheduledTask -TaskName $watchTask -ErrorAction SilentlyContinue
+        Unregister-ScheduledTask -TaskName $watchTask -Confirm:$false
+        Write-Report "예약 작업 삭제: $watchTask"
     }
 
     if (Test-Path -LiteralPath $dir) {

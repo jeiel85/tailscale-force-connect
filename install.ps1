@@ -1,7 +1,7 @@
 ﻿# Tailscale 부팅 시 강제 연결 - 설치
 #   powershell -ExecutionPolicy Bypass -File .\install.ps1          # 설치 + 끊긴 상태에서 동작 검증
 #   powershell -ExecutionPolicy Bypass -File .\install.ps1 -NoTest  # 설치만 (연결을 끊지 않음)
-#   ... -ReconnectAfter 30m   # 직접 끊은 뒤 자동 재연결까지의 시간 (기본 1h, 0이면 끔)
+#   ... -ReconnectAfter 30m   # 직접 끊은 뒤 자동 재연결까지의 시간 (기본 1h, 0이면 끔. 단위는 h, m)
 # 관리자 권한이 아니면 UAC로 스스로 다시 실행하고, 관리자 창의 결과를 이 창에 보여 준다.
 param([switch]$NoTest, [string]$ReconnectAfter = '1h', [string]$ResultFile)
 
@@ -10,15 +10,20 @@ $dir         = 'C:\ProgramData\TailscaleAutoConnect'
 $taskName    = 'Tailscale Auto Connect'
 $eventSource = 'TailscaleForceConnect'
 $logFile     = Join-Path $dir 'install.log'
-$policyKey   = 'HKLM:\SOFTWARE\Policies\Tailscale'
-$policyMark  = Join-Path $dir 'reconnect-after.set'   # 이 도구가 정책을 설정했다는 표시 (제거할 때 이 값만 지운다)
+$watchTask   = 'Tailscale Auto Reconnect'
 
-# Tailscale 공식 정책 ReconnectAfter는 Go 기간 형식(30s, 5m, 1h30m)을 받는다. 0이면 이 도구는 설정하지 않는다.
-$ReconnectAfter = $ReconnectAfter.Trim()
-$reconnectOff = @('0', 'off', '') -contains $ReconnectAfter.ToLower()
-if (-not $reconnectOff -and $ReconnectAfter -notmatch '^(\d+(\.\d+)?(h|m|s|ms|us|ns))+$') {
-    Write-Host "-ReconnectAfter 값 '$ReconnectAfter'이(가) 올바르지 않습니다. 30m, 1h, 1h30m처럼 쓰거나 0으로 끄세요." -ForegroundColor Yellow
-    exit 1
+# 직접 끊은 뒤 다시 연결할 때까지의 시간. 30m, 1h, 1h30m처럼 h·m 단위로 받는다. 0이면 감시 작업을 만들지 않는다.
+$ReconnectAfter = $ReconnectAfter.Trim().ToLower()
+$reconnectOff = @('0', 'off', '') -contains $ReconnectAfter
+$reconnectMinutes = 0
+if (-not $reconnectOff) {
+    if ($ReconnectAfter -match '^(?:(\d+)h)?(?:(\d+)m)?$' -and $ReconnectAfter -ne '') {
+        $reconnectMinutes = [int]$Matches[1] * 60 + [int]$Matches[2]
+    }
+    if ($reconnectMinutes -lt 1) {
+        Write-Host "-ReconnectAfter 값 '$ReconnectAfter'이(가) 올바르지 않습니다. 30m, 1h, 1h30m처럼 쓰거나 0으로 끄세요." -ForegroundColor Yellow
+        exit 1
+    }
 }
 
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
@@ -157,36 +162,6 @@ try {
         Write-Report "오류: Unattended 모드를 켜지 못함 (종료 코드 $setCode) $($out.Trim())"
     }
 
-    # 2-1) 직접 끊은 뒤 자동 재연결: Tailscale 공식 시스템 정책 ReconnectAfter (레지스트리, Windows 1.82+).
-    #      같은 키에 MSI 설치 속성도 들어 있으므로 키를 새로 만들거나 덮어쓰지 않고 이 값 하나만 다룬다.
-    $current = (Get-ItemProperty -Path $policyKey -Name ReconnectAfter -ErrorAction SilentlyContinue).ReconnectAfter
-    $ownedByUs = Test-Path -LiteralPath $policyMark
-    if ($reconnectOff) {
-        if ($ownedByUs) {
-            Remove-ItemProperty -Path $policyKey -Name ReconnectAfter -ErrorAction SilentlyContinue
-            Remove-Item -LiteralPath $policyMark -Force
-            Write-Report '자동 재연결: 끔 (이 도구가 설정했던 ReconnectAfter 정책을 지움)'
-        } else {
-            Write-Report '자동 재연결: 설정하지 않음 (-ReconnectAfter 0)'
-        }
-    } elseif ($current -and -not $ownedByUs -and $current -ne $ReconnectAfter) {
-        # 조직(MDM·GPO)이 정한 값일 수 있으므로 덮어쓰지 않는다.
-        Write-Report "자동 재연결: 이미 다른 ReconnectAfter 정책($current)이 있어 그대로 둠"
-    } else {
-        if (-not (Test-Path -LiteralPath $policyKey)) { New-Item -Path $policyKey | Out-Null }
-        Set-ItemProperty -Path $policyKey -Name ReconnectAfter -Value $ReconnectAfter -Type String
-        Set-Content -LiteralPath $policyMark -Value $ReconnectAfter -Encoding ASCII
-        $ErrorActionPreference = 'Continue'
-        $reload = & $ts syspolicy reload 2>&1 | Out-String
-        $ErrorActionPreference = 'Stop'
-        if ($reload -match 'ReconnectAfter') {
-            Write-Report "자동 재연결: 직접 끊으면 $ReconnectAfter 뒤 다시 연결 (Tailscale ReconnectAfter 정책)"
-        } else {
-            $exitCode = 1
-            Write-Report "오류: ReconnectAfter 정책을 썼지만 Tailscale이 읽지 못함. 'tailscale syspolicy list'로 확인하세요. $($reload.Trim())"
-        }
-    }
-
     # 3) 이벤트 로그 원본: connect.ps1이 부팅 결과를 '응용 프로그램' 로그에 남긴다.
     if (-not [Diagnostics.EventLog]::SourceExists($eventSource)) {
         New-EventLog -LogName Application -Source $eventSource
@@ -201,6 +176,23 @@ try {
     $settings  = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Minutes 15) -MultipleInstances IgnoreNew
     Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Description 'Tailscale을 부팅 때마다 연결 상태로 만든다 (수동 Disconnect 상태로 재부팅해도).' -Force | Out-Null
     Write-Report "예약 작업 등록: $taskName (시작 시, SYSTEM)"
+
+    # 4-1) 직접 끊은 뒤 자동 재연결: SYSTEM 작업이 주기적으로 상태를 보고, 끊긴 지 N분이 지나면 다시 연결한다.
+    if ($reconnectOff) {
+        if (Get-ScheduledTask -TaskName $watchTask -ErrorAction SilentlyContinue) {
+            Unregister-ScheduledTask -TaskName $watchTask -Confirm:$false
+        }
+        Remove-Item -LiteralPath (Join-Path $dir 'stopped-since.txt') -Force -ErrorAction SilentlyContinue
+        Write-Report '자동 재연결: 끔 (-ReconnectAfter 0)'
+    } else {
+        $interval  = if ($reconnectMinutes -lt 10) { 1 } else { 5 }   # 확인 주기(분). 실제 재연결은 설정 시간 + 최대 한 주기
+        $wAction   = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument "-NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$dir\connect.ps1`" -Watch -ReconnectAfterMinutes $reconnectMinutes"
+        $wTrigger  = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) -RepetitionInterval (New-TimeSpan -Minutes $interval)
+        $wSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Minutes 2) -MultipleInstances IgnoreNew
+        Register-ScheduledTask -TaskName $watchTask -Action $wAction -Trigger $wTrigger -Principal $principal -Settings $wSettings -Description "직접 끊은 Tailscale을 $reconnectMinutes 분 뒤 다시 연결한다." -Force | Out-Null
+        Remove-Item -LiteralPath (Join-Path $dir 'stopped-since.txt') -Force -ErrorAction SilentlyContinue
+        Write-Report "자동 재연결: 직접 끊으면 약 $reconnectMinutes 분 뒤 다시 연결 (예약 작업 $watchTask, $interval 분마다 확인)"
+    }
 
     # 빠른 시작이 켜져 있으면 '종료 → 전원 켜기'는 최대 절전 복귀라 시작 시 작업이 실행되지 않는다.
     $hiberboot = (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Power' -Name HiberbootEnabled -ErrorAction SilentlyContinue).HiberbootEnabled
