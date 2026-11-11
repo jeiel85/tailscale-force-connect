@@ -33,6 +33,25 @@ Tailscale Windows 클라이언트 **1.84 이상**에는 비슷한 목적의 [시
 ## 설치
 
 필요한 것: Windows 10/11, Tailscale(기본 경로 `C:\Program Files\Tailscale\`)에 로그인한 상태, 관리자 권한.
+세 가지 방법 모두 설치 중에 UAC 창이 한 번 뜹니다.
+
+**방법 1. 한 줄로 설치** — cmd나 PowerShell에 붙여 넣습니다.
+
+```bat
+powershell -c "irm https://jeiel85.github.io/tailscale-force-connect/get.ps1 | iex"
+```
+
+[`get.ps1`](docs/get.ps1)이 [최신 릴리스](https://github.com/jeiel85/tailscale-force-connect/releases/latest) zip을 임시 폴더에 받아 `install.ps1`을 실행하고,
+끝나면 임시 폴더를 지웁니다. 인터넷에서 받은 스크립트를 바로 실행하는 방식이니, 먼저 내용을 읽어 보고 싶다면 방법 2를 쓰세요.
+
+**방법 2. zip 받아서 더블클릭**
+
+1. [`tailscale-force-connect.zip`](https://github.com/jeiel85/tailscale-force-connect/releases/latest/download/tailscale-force-connect.zip)을 받아 압축을 풉니다.
+2. `install.cmd`를 더블클릭합니다.
+
+"Windows의 PC 보호" 창이 뜨면 **추가 정보 → 실행**을 누르세요. 서명하지 않은 스크립트라서 뜨는 경고입니다.
+
+**방법 3. git으로 받기**
 
 ```powershell
 git clone https://github.com/jeiel85/tailscale-force-connect.git
@@ -40,11 +59,16 @@ cd tailscale-force-connect
 powershell -ExecutionPolicy Bypass -File .\install.ps1
 ```
 
-- 관리자 권한이 아니면 스스로 UAC 창을 띄웁니다.
+설치 결과:
+
 - 설치가 끝나면 **몇 초 동안 일부러 연결을 끊었다가** 예약 작업으로 다시 연결되는지 확인합니다.
-  그 PC에 Tailscale로 원격 접속해 있다면 `-NoTest`를 붙여 이 확인을 건너뛰세요.
+  그 PC에 Tailscale로 원격 접속해 있다면 이 확인을 건너뛰세요. 방법 2는 `install.cmd -NoTest`, 방법 3은 `install.ps1 -NoTest`로 실행하면 됩니다.
 - 마지막 줄이 `완료 (종료 코드 0)`이고 그 앞에 `검증 성공`이 있으면 설치가 끝난 것입니다.
 - Unattended 모드(로그인 전에도 연결 유지)가 꺼져 있으면 켭니다.
+
+> **Windows 빠른 시작을 확인하세요.** 빠른 시작이 켜져 있으면(Windows 기본값) **일반 종료 후 전원을 켤 때**는 완전 부팅이 아니라
+> 최대 절전 복귀가 되어 이 작업이 실행되지 않습니다. 재시작과 정전 뒤 부팅에서는 동작합니다. 설치 스크립트가 빠른 시작이 켜진 것을 감지하면 경고를 출력합니다.
+> 항상 동작하게 하려면 제어판 → 전원 옵션 → 전원 단추 작동 설정에서 **빠른 시작 켜기**를 끄세요.
 
 **권장:** [관리 콘솔](https://login.tailscale.com/admin/machines)에서 그 기기의 **Disable key expiry**를 켜세요.
 키가 만료되면(기본 180일) 다시 로그인해야 하므로 자동 연결이 되지 않습니다. 이때는 `connect.log`에 `로그인이 필요함`이 남습니다.
@@ -56,6 +80,8 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1
 | `connect.ps1` | 부팅 때 실행되는 본체입니다. 서비스가 꺼져 있으면 켜고, 연결될 때까지 10초 간격으로 최대 30회(약 5분) `tailscale up`을 실행합니다. |
 | `install.ps1` | `connect.ps1`을 `C:\ProgramData\TailscaleAutoConnect\`에 복사하고, Unattended 모드를 켜고, 예약 작업을 등록한 뒤 동작을 확인합니다. |
 | `uninstall.ps1` | 예약 작업과 설치 폴더를 지웁니다. Tailscale 본체와 Unattended 설정은 건드리지 않습니다. |
+| `install.cmd`, `uninstall.cmd` | 더블클릭용 실행 파일입니다. 같은 폴더의 `.ps1`을 실행합니다. |
+| `docs/get.ps1` | 한 줄 설치용 스크립트입니다. GitHub Pages로 배포되며, 릴리스 zip에는 들어가지 않습니다. |
 
 설치되는 것:
 
@@ -63,6 +89,7 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1
 - 폴더 `C:\ProgramData\TailscaleAutoConnect\`: SYSTEM과 Administrators만 쓸 수 있고 Users는 읽기만 할 수 있습니다.
   SYSTEM이 실행하는 스크립트를 일반 사용자가 바꾸지 못하게 하려는 설정입니다.
   - `connect.ps1`
+  - `uninstall.ps1`: 한 줄로 설치했을 때도 제거할 수 있도록 함께 복사해 둡니다.
   - `connect.log`: 부팅할 때마다 남는 실행 기록입니다. 200KB를 넘으면 최근 500줄만 남깁니다.
   - `install.log`: 마지막 설치 결과입니다.
 
@@ -98,9 +125,23 @@ tailscale status
 
 ## 제거
 
-```powershell
-powershell -ExecutionPolicy Bypass -File .\uninstall.ps1
+받은 폴더에서 `uninstall.cmd`를 더블클릭하거나, 어느 방법으로 설치했든 아래 명령을 실행합니다.
+
+```bat
+powershell -ExecutionPolicy Bypass -File C:\ProgramData\TailscaleAutoConnect\uninstall.ps1
 ```
+
+## 릴리스 만들기
+
+설치에 필요한 파일만 담은 zip은 `git archive`로 만듭니다. 무엇을 뺄지는 `.gitattributes`의 `export-ignore`가 정합니다.
+
+```bash
+git tag vX.Y.Z && git push origin vX.Y.Z
+git archive --format=zip --prefix=tailscale-force-connect/ -o tailscale-force-connect.zip vX.Y.Z
+gh release create vX.Y.Z tailscale-force-connect.zip --title vX.Y.Z --notes "..."
+```
+
+한 줄 설치와 다운로드 링크는 `releases/latest`를 가리키므로 asset 이름은 항상 `tailscale-force-connect.zip`으로 둡니다.
 
 ## 라이선스
 

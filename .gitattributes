@@ -1,2 +1,8 @@
-# PowerShell 5.1용 스크립트: CRLF로 체크아웃 (UTF-8 BOM은 git이 그대로 보존)
+# PowerShell 5.1·cmd용 스크립트: CRLF로 체크아웃 (UTF-8 BOM은 git이 그대로 보존)
 *.ps1 text eol=crlf
+*.cmd text eol=crlf
+
+# 릴리스 zip(git archive)에는 설치에 필요한 파일만 넣는다.
+docs/          export-ignore
+.gitattributes export-ignore
+.gitignore     export-ignore

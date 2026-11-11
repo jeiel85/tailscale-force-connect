@@ -43,7 +43,9 @@ try {
     $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule('BUILTIN\Users', 'ReadAndExecute', $inh, 'None', 'Allow')))
     Set-Acl -Path $dir -AclObject $acl
     Copy-Item -Path (Join-Path $PSScriptRoot 'connect.ps1') -Destination $dir -Force
-    Write-Report "스크립트 설치: $dir\connect.ps1"
+    # 한 줄 설치로 받은 경우 내려받은 폴더가 지워지므로 제거 스크립트도 함께 둔다.
+    Copy-Item -Path (Join-Path $PSScriptRoot 'uninstall.ps1') -Destination $dir -Force
+    Write-Report "스크립트 설치: $dir\connect.ps1, uninstall.ps1"
 
     # 2) Unattended 모드: 로그인 전·로그아웃 후에도 연결 유지. 꺼져 있으면 켠다.
     $prefs = & $ts debug prefs | Out-String | ConvertFrom-Json
@@ -64,6 +66,13 @@ try {
     $settings  = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Minutes 10) -MultipleInstances IgnoreNew
     Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Description 'Tailscale을 부팅 때마다 연결 상태로 만든다 (수동 Disconnect 상태로 재부팅해도).' -Force | Out-Null
     Write-Report "예약 작업 등록: $taskName (시작 시, SYSTEM)"
+
+    # 빠른 시작이 켜져 있으면 '종료 → 전원 켜기'는 최대 절전 복귀라 시작 시 작업이 실행되지 않는다.
+    $hiberboot = (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Power' -Name HiberbootEnabled -ErrorAction SilentlyContinue).HiberbootEnabled
+    if ($hiberboot -eq 1) {
+        Write-Report '경고: Windows 빠른 시작이 켜져 있습니다. 재시작이나 정전 뒤에는 동작하지만, 일반 종료 후 전원을 켤 때는 동작하지 않습니다.'
+        Write-Report '      항상 동작하게 하려면 제어판 > 전원 옵션 > 전원 단추 작동 설정에서 [빠른 시작 켜기]를 끄세요.'
+    }
 
     # 4) 검증: 일부러 끊고 작업을 실행해 다시 연결되는지 확인한다.
     $ErrorActionPreference = 'Continue'
