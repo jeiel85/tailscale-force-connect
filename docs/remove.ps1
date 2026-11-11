@@ -7,7 +7,7 @@
 # If that copy is missing (very early installs), downloads the latest release zip and runs its uninstall.ps1.
 # Removes the scheduled task, the install folder and the event log source. Tailscale itself is not touched.
 # Keep this file ASCII-only and do not use 'exit' (it runs inside the caller's session via iex).
-& {
+function Invoke-TailscaleForceConnectRemove {
     $ErrorActionPreference = 'Stop'
     $local = 'C:\ProgramData\TailscaleAutoConnect\uninstall.ps1'
     $tmp = $null
@@ -42,3 +42,4 @@
         if ($tmp) { Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue }
     }
 }
+Invoke-TailscaleForceConnectRemove

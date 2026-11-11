@@ -12,7 +12,7 @@
 # On failure it throws, so `powershell -c "..."` exits with a non-zero code.
 # Keep this file ASCII-only: Invoke-RestMethod may not decode it as UTF-8.
 # Do not use 'exit' here: the script runs inside the caller's session via iex.
-& {
+function Invoke-TailscaleForceConnectInstall {
     $ErrorActionPreference = 'Stop'
     try {
         [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
@@ -46,3 +46,4 @@
         Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
     }
 }
+Invoke-TailscaleForceConnectInstall
