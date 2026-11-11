@@ -3,16 +3,45 @@
 #   cmd:        powershell -c "irm https://jeiel85.github.io/tailscale-force-connect/remove.ps1 | iex"
 #   PowerShell: irm https://jeiel85.github.io/tailscale-force-connect/remove.ps1 | iex
 #
-# Runs the uninstall.ps1 that install.ps1 copied to C:\ProgramData\TailscaleAutoConnect\.
-# If that copy is missing (very early installs), downloads the latest release zip and runs its uninstall.ps1.
+# Runs the uninstall.ps1 that install.ps1 copied to C:\ProgramData\TailscaleAutoConnect\, but only if that
+# folder and file are owned by and writable only by Administrators/SYSTEM. Otherwise (missing, or possibly
+# planted by another user) it downloads the latest release zip and runs its uninstall.ps1.
 # Removes the scheduled task, the install folder and the event log source. Tailscale itself is not touched.
 # Keep this file ASCII-only and do not use 'exit' (it runs inside the caller's session via iex).
+function Test-TailscaleForceConnectTrustedPath([string]$Path) {
+    # True only if $Path is not a link, is owned by Administrators/SYSTEM, and only they can modify it.
+    # Any user can create folders under C:\ProgramData, so existence alone proves nothing.
+    $trusted = @('S-1-5-32-544', 'S-1-5-18')
+    $writeMask = 0x2 -bor 0x4 -bor 0x10 -bor 0x40 -bor 0x100 -bor 0x10000 -bor 0x40000 -bor 0x80000
+    try {
+        $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+        if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) { return $false }
+        $acl = Get-Acl -LiteralPath $Path -ErrorAction Stop
+        if ($trusted -notcontains $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value) { return $false }
+        foreach ($rule in $acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier])) {
+            if ($rule.AccessControlType -ne 'Allow') { continue }
+            if (([int]$rule.FileSystemRights -band $writeMask) -eq 0) { continue }
+            if ($trusted -notcontains $rule.IdentityReference.Value) { return $false }
+        }
+        return $true
+    } catch { return $false }
+}
+
 function Invoke-TailscaleForceConnectRemove {
     $ErrorActionPreference = 'Stop'
-    $local = 'C:\ProgramData\TailscaleAutoConnect\uninstall.ps1'
+    $localDir = 'C:\ProgramData\TailscaleAutoConnect'
+    $local = Join-Path $localDir 'uninstall.ps1'
     $tmp = $null
     try {
-        if (Test-Path $local) {
+        $useLocal = $false
+        if (Test-Path -LiteralPath $local) {
+            if ((Test-TailscaleForceConnectTrustedPath $localDir) -and (Test-TailscaleForceConnectTrustedPath $local)) {
+                $useLocal = $true
+            } else {
+                Write-Warning "$local is not protected (owner or permissions are not admin-only). Ignoring it and using the release package instead."
+            }
+        }
+        if ($useLocal) {
             # Run it in place: the folder is admin-only, so nothing can swap the file before it runs elevated.
             # (A script may delete its own folder while running; PowerShell has already read it.)
             $uninstaller = $local
