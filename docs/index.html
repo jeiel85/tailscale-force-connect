@@ -211,7 +211,7 @@
     <div>
       <h1>꺼 둔 채로 재부팅해도,<br><span class="again">다시 연결됩니다.</span></h1>
       <p class="lede">Windows에서 Tailscale을 <strong>Disconnect</strong> 해 둔 채로 재부팅하면, 끊긴 상태 그대로 켜집니다.
-        이 도구는 부팅할 때마다 SYSTEM 권한으로 다시 연결합니다. 로그인하지 않아도 되고, 평소에 직접 끊는 것도 지금처럼 할 수 있습니다.</p>
+        이 도구는 부팅할 때마다 SYSTEM 권한으로 다시 연결합니다. 로그인하지 않아도 됩니다. 평소에 직접 끊을 수도 있지만, <strong>1시간</strong>이 지나면 자동으로 다시 연결됩니다.</p>
       <div class="hero-actions">
         <a class="btn" href="#install">설치 방법</a>
         <a class="btn ghost" href="https://github.com/jeiel85/tailscale-force-connect">소스 보기</a>
@@ -280,7 +280,7 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1</code></pre><button type=
           <tbody>
             <tr><th scope="row"><code>AlwaysOn.<wbr>Enabled</code></th><td class="no">불가</td><td>끊을 수 없게 막습니다. <code>OverrideWithReason</code>을 켜면 사유를 적고 끊을 수 있습니다.</td></tr>
             <tr><th scope="row"><code>Reconnect<wbr>After</code></th><td class="yes">가능</td><td>정한 시간(예: <code>30m</code>)이 지나면, 재부팅 여부와 관계없이 다시 연결합니다.</td></tr>
-            <tr class="mine"><th scope="row">이 도구</th><td class="yes">가능</td><td>부팅할 때만 다시 연결합니다. 그 전까지는 끊은 상태가 유지됩니다.</td></tr>
+            <tr class="mine"><th scope="row">이 도구</th><td class="yes">가능</td><td><code>ReconnectAfter</code>를 <code>1h</code>로 설정하고(바꿀 수 있음), 부팅할 때는 기다리지 않고 바로 다시 연결합니다.</td></tr>
           </tbody>
         </table>
         <p class="hint">공식 문서에는 정책이 재부팅 때 어떻게 동작하는지 따로 적혀 있지 않습니다. <a href="https://tailscale.com/docs/features/tailscale-system-policies">Tailscale 시스템 정책 문서</a></p>
@@ -298,6 +298,7 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1</code></pre><button type=
         <div><dt>예약 작업</dt><dd><code>Tailscale Auto Connect</code>: 부팅하고 20초 뒤 SYSTEM으로 실행합니다. 연결될 때까지 10초 간격으로 최대 10분 동안 <code>tailscale up</code>을 시도합니다.</dd></div>
         <div><dt>스크립트 폴더</dt><dd><code>C:\ProgramData\TailscaleAutoConnect\</code>: 관리자만 고칠 수 있고, 일반 사용자는 읽기만 할 수 있습니다.</dd></div>
         <div><dt>로그</dt><dd>같은 폴더의 <code>connect.log</code>와 이벤트 뷰어의 응용 프로그램 로그(원본 <code>TailscaleForceConnect</code>)에 부팅할 때마다 결과가 남습니다. 연결 실패나 로그인이 필요한 상황(키 만료)은 오류로 기록됩니다.</dd></div>
+        <div><dt>자동 재연결 정책</dt><dd>Tailscale 공식 시스템 정책 <code>ReconnectAfter</code>를 <code>1h</code>로 설정합니다. 직접 끊으면 1시간 뒤 Tailscale이 스스로 다시 연결합니다. 시간은 <code>install.cmd -ReconnectAfter 30m</code>이나 한 줄 설치 앞의 <code>set TFC_RECONNECT_AFTER=30m &amp;&amp;</code>로 바꾸고, <code>0</code>이면 설정하지 않습니다. 조직이 이미 정한 값은 건드리지 않습니다.</dd></div>
         <div><dt>Unattended 모드</dt><dd>꺼져 있으면 켭니다. 그래야 Windows에 로그인하기 전에도 연결됩니다.</dd></div>
         <div><dt>기존 설정</dt><dd>플래그 없이 <code>tailscale up</code>만 실행하므로 exit node, 경로 수락 같은 설정은 바뀌지 않습니다.</dd></div>
       </dl>
@@ -308,7 +309,7 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1</code></pre><button type=
     <div class="wrap block-grid">
       <div>
         <h2 id="h-remove">제거</h2>
-        <p class="side-note">예약 작업, 설치 폴더, 이벤트 로그 원본을 지웁니다. Tailscale 설정은 그대로 남습니다.</p>
+        <p class="side-note">예약 작업, 설치 폴더, 이벤트 로그 원본, 이 도구가 설정한 자동 재연결 정책을 지웁니다. 그 밖의 Tailscale 설정은 그대로 남습니다.</p>
       </div>
       <div class="methods">
         <div class="method">

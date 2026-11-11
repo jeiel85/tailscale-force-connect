@@ -1,20 +1,31 @@
 ﻿# Tailscale 부팅 시 강제 연결 - 설치
 #   powershell -ExecutionPolicy Bypass -File .\install.ps1          # 설치 + 끊긴 상태에서 동작 검증
 #   powershell -ExecutionPolicy Bypass -File .\install.ps1 -NoTest  # 설치만 (연결을 끊지 않음)
+#   ... -ReconnectAfter 30m   # 직접 끊은 뒤 자동 재연결까지의 시간 (기본 1h, 0이면 끔)
 # 관리자 권한이 아니면 UAC로 스스로 다시 실행하고, 관리자 창의 결과를 이 창에 보여 준다.
-param([switch]$NoTest, [string]$ResultFile)
+param([switch]$NoTest, [string]$ReconnectAfter = '1h', [string]$ResultFile)
 
 $ErrorActionPreference = 'Stop'
 $dir         = 'C:\ProgramData\TailscaleAutoConnect'
 $taskName    = 'Tailscale Auto Connect'
 $eventSource = 'TailscaleForceConnect'
 $logFile     = Join-Path $dir 'install.log'
+$policyKey   = 'HKLM:\SOFTWARE\Policies\Tailscale'
+$policyMark  = Join-Path $dir 'reconnect-after.set'   # 이 도구가 정책을 설정했다는 표시 (제거할 때 이 값만 지운다)
+
+# Tailscale 공식 정책 ReconnectAfter는 Go 기간 형식(30s, 5m, 1h30m)을 받는다. 0이면 이 도구는 설정하지 않는다.
+$ReconnectAfter = $ReconnectAfter.Trim()
+$reconnectOff = @('0', 'off', '') -contains $ReconnectAfter.ToLower()
+if (-not $reconnectOff -and $ReconnectAfter -notmatch '^(\d+(\.\d+)?(h|m|s|ms|us|ns))+$') {
+    Write-Host "-ReconnectAfter 값 '$ReconnectAfter'이(가) 올바르지 않습니다. 30m, 1h, 1h30m처럼 쓰거나 0으로 끄세요." -ForegroundColor Yellow
+    exit 1
+}
 
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 if (-not $isAdmin) {
     # 관리자 창은 끝나자마자 닫히므로 결과를 새 임시 파일로 넘겨받는다(이전 install.log를 잘못 보여 주지 않도록).
     $result  = Join-Path $env:TEMP ('tailscale-force-connect-install-' + [guid]::NewGuid().ToString('N') + '.txt')
-    $argList = "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`" -ResultFile `"$result`""
+    $argList = "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`" -ResultFile `"$result`" -ReconnectAfter `"$ReconnectAfter`""
     if ($NoTest) { $argList += ' -NoTest' }
     try {
         $p = Start-Process powershell.exe -Verb RunAs -ArgumentList $argList -PassThru -Wait
@@ -144,6 +155,36 @@ try {
     else {
         $exitCode = 1   # 로그인 전 부팅에서 연결되지 않을 수 있으므로 설치 실패로 본다
         Write-Report "오류: Unattended 모드를 켜지 못함 (종료 코드 $setCode) $($out.Trim())"
+    }
+
+    # 2-1) 직접 끊은 뒤 자동 재연결: Tailscale 공식 시스템 정책 ReconnectAfter (레지스트리, Windows 1.82+).
+    #      같은 키에 MSI 설치 속성도 들어 있으므로 키를 새로 만들거나 덮어쓰지 않고 이 값 하나만 다룬다.
+    $current = (Get-ItemProperty -Path $policyKey -Name ReconnectAfter -ErrorAction SilentlyContinue).ReconnectAfter
+    $ownedByUs = Test-Path -LiteralPath $policyMark
+    if ($reconnectOff) {
+        if ($ownedByUs) {
+            Remove-ItemProperty -Path $policyKey -Name ReconnectAfter -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $policyMark -Force
+            Write-Report '자동 재연결: 끔 (이 도구가 설정했던 ReconnectAfter 정책을 지움)'
+        } else {
+            Write-Report '자동 재연결: 설정하지 않음 (-ReconnectAfter 0)'
+        }
+    } elseif ($current -and -not $ownedByUs -and $current -ne $ReconnectAfter) {
+        # 조직(MDM·GPO)이 정한 값일 수 있으므로 덮어쓰지 않는다.
+        Write-Report "자동 재연결: 이미 다른 ReconnectAfter 정책($current)이 있어 그대로 둠"
+    } else {
+        if (-not (Test-Path -LiteralPath $policyKey)) { New-Item -Path $policyKey | Out-Null }
+        Set-ItemProperty -Path $policyKey -Name ReconnectAfter -Value $ReconnectAfter -Type String
+        Set-Content -LiteralPath $policyMark -Value $ReconnectAfter -Encoding ASCII
+        $ErrorActionPreference = 'Continue'
+        $reload = & $ts syspolicy reload 2>&1 | Out-String
+        $ErrorActionPreference = 'Stop'
+        if ($reload -match 'ReconnectAfter') {
+            Write-Report "자동 재연결: 직접 끊으면 $ReconnectAfter 뒤 다시 연결 (Tailscale ReconnectAfter 정책)"
+        } else {
+            $exitCode = 1
+            Write-Report "오류: ReconnectAfter 정책을 썼지만 Tailscale이 읽지 못함. 'tailscale syspolicy list'로 확인하세요. $($reload.Trim())"
+        }
     }
 
     # 3) 이벤트 로그 원본: connect.ps1이 부팅 결과를 '응용 프로그램' 로그에 남긴다.
