@@ -7,6 +7,10 @@
 #   cmd:        set TFC_NOTEST=1 && powershell -c "irm https://jeiel85.github.io/tailscale-force-connect/get.ps1 | iex"
 #   PowerShell: $env:TFC_NOTEST=1; irm https://jeiel85.github.io/tailscale-force-connect/get.ps1 | iex
 #
+# Change how long a manual disconnect lasts before Tailscale reconnects (default 1h, 0 = do not set):
+#   cmd:        set TFC_RECONNECT_AFTER=30m && powershell -c "irm https://jeiel85.github.io/tailscale-force-connect/get.ps1 | iex"
+#   PowerShell: $env:TFC_RECONNECT_AFTER='30m'; irm https://jeiel85.github.io/tailscale-force-connect/get.ps1 | iex
+#
 # Downloads the latest release zip from GitHub, extracts it to a temp folder,
 # runs install.ps1 (which asks for administrator rights), then deletes the temp folder.
 # On failure it throws, so `powershell -c "..."` exits with a non-zero code.
@@ -36,6 +40,10 @@ function Invoke-TailscaleForceConnectInstall {
         if ($env:TFC_NOTEST -and $env:TFC_NOTEST.Trim() -ne '0') {
             $installArgs += '-NoTest'
             Write-Host 'TFC_NOTEST is set: the disconnect test will be skipped.'
+        }
+        if ($env:TFC_RECONNECT_AFTER) {
+            $installArgs += @('-ReconnectAfter', $env:TFC_RECONNECT_AFTER.Trim())
+            Write-Host "TFC_RECONNECT_AFTER is set: reconnect after $($env:TFC_RECONNECT_AFTER.Trim())."
         }
         Write-Host 'Running install.ps1 (a UAC prompt will appear)...'
         & powershell.exe @installArgs

@@ -23,6 +23,7 @@ if (-not $isAdmin) {
 }
 
 $taskName    = 'Tailscale Auto Connect'
+$watchTask   = 'Tailscale Auto Reconnect'
 $dir         = 'C:\ProgramData\TailscaleAutoConnect'
 $eventSource = 'TailscaleForceConnect'
 
@@ -50,6 +51,11 @@ try {
         Write-Report "예약 작업 삭제: $taskName"
     } else {
         Write-Report "예약 작업 없음: $taskName"
+    }
+    if (Get-ScheduledTask -TaskName $watchTask -ErrorAction SilentlyContinue) {
+        Stop-ScheduledTask -TaskName $watchTask -ErrorAction SilentlyContinue
+        Unregister-ScheduledTask -TaskName $watchTask -Confirm:$false
+        Write-Report "예약 작업 삭제: $watchTask"
     }
 
     if (Test-Path -LiteralPath $dir) {
