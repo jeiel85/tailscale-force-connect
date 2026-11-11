@@ -83,8 +83,10 @@ if ($Watch) {
         Log "감시: 끊긴 상태 확인 - $ReconnectAfterMinutes 분 뒤에도 끊겨 있으면 다시 연결"
         exit 0
     }
-    $mins = [int][Math]::Floor(($now - $since).TotalMinutes)
-    if ($mins -lt $ReconnectAfterMinutes) { exit 0 }
+    # 작업 실행 시각이 매번 조금씩 어긋나므로 30초 여유를 둔다(그렇지 않으면 판정이 한 주기 늦어진다).
+    $elapsed = ($now - $since).TotalMinutes
+    if ($elapsed + 0.5 -lt $ReconnectAfterMinutes) { exit 0 }
+    $mins = [int][Math]::Round($elapsed)
 
     Log "감시: $mins 분 동안 끊겨 있음 -> tailscale up"
     $p = Start-Process -FilePath $ts -ArgumentList 'up' -NoNewWindow -PassThru
