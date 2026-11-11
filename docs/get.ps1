@@ -3,11 +3,16 @@
 #   cmd:        powershell -c "irm https://jeiel85.github.io/tailscale-force-connect/get.ps1 | iex"
 #   PowerShell: irm https://jeiel85.github.io/tailscale-force-connect/get.ps1 | iex
 #
+# Skip the post-install disconnect test (e.g. when connected to this PC over Tailscale):
+#   cmd:        set TFC_NOTEST=1 && powershell -c "irm https://jeiel85.github.io/tailscale-force-connect/get.ps1 | iex"
+#   PowerShell: $env:TFC_NOTEST=1; irm https://jeiel85.github.io/tailscale-force-connect/get.ps1 | iex
+#
 # Downloads the latest release zip from GitHub, extracts it to a temp folder,
 # runs install.ps1 (which asks for administrator rights), then deletes the temp folder.
+# On failure it throws, so `powershell -c "..."` exits with a non-zero code.
 # Keep this file ASCII-only: Invoke-RestMethod may not decode it as UTF-8.
 # Do not use 'exit' here: the script runs inside the caller's session via iex.
-& {
+function Invoke-TailscaleForceConnectInstall {
     $ErrorActionPreference = 'Stop'
     try {
         [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
@@ -25,16 +30,20 @@
         Expand-Archive -Path $zip -DestinationPath $tmp
 
         $installer = Join-Path $tmp 'tailscale-force-connect\install.ps1'
-        if (-not (Test-Path $installer)) { throw "install.ps1 was not found in the downloaded package." }
+        if (-not (Test-Path $installer)) { throw 'install.ps1 was not found in the downloaded package.' }
 
-        Write-Host 'Running install.ps1 (a UAC prompt will appear)...'
-        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $installer
-        if ($LASTEXITCODE -ne 0) {
-            Write-Warning "install.ps1 exited with code $LASTEXITCODE. See C:\ProgramData\TailscaleAutoConnect\install.log"
+        $installArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $installer)
+        if ($env:TFC_NOTEST -and $env:TFC_NOTEST.Trim() -ne '0') {
+            $installArgs += '-NoTest'
+            Write-Host 'TFC_NOTEST is set: the disconnect test will be skipped.'
         }
+        Write-Host 'Running install.ps1 (a UAC prompt will appear)...'
+        & powershell.exe @installArgs
+        if ($LASTEXITCODE -ne 0) { throw "install.ps1 failed with exit code $LASTEXITCODE." }
     } catch {
         Write-Error "tailscale-force-connect install failed: $($_.Exception.Message)"
     } finally {
         Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
     }
 }
+Invoke-TailscaleForceConnectInstall
