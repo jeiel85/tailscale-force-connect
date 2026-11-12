@@ -32,7 +32,10 @@ function Invoke-TailscaleForceConnectInstall {
         $oldProgress = $ProgressPreference
         $ProgressPreference = 'SilentlyContinue'   # the progress bar makes Invoke-WebRequest very slow on PowerShell 5.1
         try { Invoke-WebRequest -Uri $url -OutFile $zip -UseBasicParsing } finally { $ProgressPreference = $oldProgress }
-        Expand-Archive -Path $zip -DestinationPath $tmp
+        # Not Expand-Archive: when cmd is started from PowerShell 7, PSModulePath makes Windows PowerShell 5.1
+        # load PowerShell 7's Archive module, which calls a .NET Core-only overload and fails.
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
+        [IO.Compression.ZipFile]::ExtractToDirectory($zip, $tmp)
 
         $installer = Join-Path $tmp 'tailscale-force-connect\install.ps1'
         if (-not (Test-Path $installer)) { throw 'install.ps1 was not found in the downloaded package.' }
