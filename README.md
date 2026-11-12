@@ -43,12 +43,26 @@ Tailscale Windows 클라이언트 **1.84 이상**에는 비슷한 목적의 [시
 - 부팅 시 자동 연결, 직접 끊은 뒤 자동 재연결 설정. 끊긴 상태라면 몇 분 뒤 다시 연결되는지도 보여 줍니다.
 - 최근 기록(`connect.log`)
 - 버튼: 재연결 시간 바꾸기, 동작 확인, 제거. 이 버튼을 누를 때만 UAC 창이 뜹니다.
+- 새 버전 알림: 창을 열 때 GitHub 최신 릴리스를 확인하고, 새 버전이 있으면 위쪽에 [업데이트] 버튼을 보여 줍니다(아래 "업데이트" 참고).
 
 창을 여는 것만으로는 관리자 권한이 필요 없습니다. 상태는 일반 권한으로 읽을 수 있는 정보(`tailscale status`, `settings.json`, `connect.log`)만 씁니다.
 버튼은 `C:\Program Files\Tailscale Force Connect\`에 있는 스크립트를 관리자 권한으로 실행합니다. 이 폴더는 관리자만 쓸 수 있습니다.
 Rust와 [Slint](https://slint.dev)로 만들었고(소프트웨어 렌더러), GPU가 없는 환경이나 원격 데스크톱에서도 그려집니다. 실행 파일은 약 8MB입니다.
 
 > **원격으로 접속 중이라면** "동작 확인"을 누르지 마세요. 연결을 몇 초 끊었다가 다시 연결되는지 보는 기능이라, 그 사이 원격 연결이 끊깁니다.
+
+## 업데이트
+
+관리 창에 "새 버전" 알림이 뜨면 **[업데이트]** 를 누르세요. UAC 창이 한 번 뜨고, 관리 창이 닫혔다가 새 버전으로 다시 열립니다.
+
+업데이트는 [`update.ps1`](update.ps1)이 관리자 권한으로 진행합니다.
+
+1. GitHub 최신 릴리스의 zip을 관리자만 쓸 수 있는 `C:\Program Files\Tailscale Force Connect\` 안의 임시 폴더에 받습니다.
+2. GitHub이 릴리스 파일마다 기록하는 **SHA-256 값과 비교**합니다. 다르거나 기록이 없으면 중단합니다.
+3. 지금의 자동 재연결 설정을 유지한 채 `install.ps1 -NoTest`로 설치합니다. **연결은 끊지 않습니다.**
+
+새 버전은 자동으로 확인하지만, 설치는 사용자가 눌러야 진행합니다. 사용자 승인 없이 SYSTEM 권한으로 몰래 업데이트하는 방식은 쓰지 않습니다. 그 방식이면 릴리스가 오염됐을 때 받은 코드가 모든 설치 PC에서 곧바로 SYSTEM 권한으로 실행되기 때문입니다([DECISIONS.md](DECISIONS.md)).
+명령으로 업데이트하려면 한 줄 설치를 다시 실행하거나, 관리자 PowerShell에서 `& "C:\Program Files\Tailscale Force Connect\update.ps1"`를 실행합니다.
 
 ## 설치
 
@@ -110,6 +124,7 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1
 | `connect.ps1` | 부팅 때 실행되는 본체입니다. 서비스가 꺼져 있으면 켜고, 연결될 때까지 최대 10분 동안 10초 간격으로 `tailscale up`을 실행합니다. 결과는 로그 파일과 이벤트 로그에 남깁니다. |
 | `install.ps1` | `connect.ps1`을 `C:\ProgramData\TailscaleAutoConnect\`에 복사하고, Unattended 모드를 켜고, 이벤트 로그 원본과 예약 작업 2개(부팅 시 연결, 자동 재연결 감시)를 등록한 뒤 동작을 확인합니다. |
 | `uninstall.ps1` | 예약 작업 2개, 설치 폴더, 이벤트 로그 원본을 지우고 결과를 보여 줍니다. Tailscale 본체와 Unattended 설정은 건드리지 않습니다. |
+| `update.ps1` | 최신 릴리스를 받아 SHA-256을 확인한 뒤, 설정을 유지하고 연결을 끊지 않은 채 설치합니다. 관리 창의 [업데이트] 버튼이 실행합니다. |
 | `install.cmd`, `uninstall.cmd` | 더블클릭용 실행 파일입니다. 같은 폴더의 `.ps1`을 실행합니다. |
 | `TailscaleForceConnect.exe` | 관리 창입니다(릴리스 zip에만 들어 있음). 소스는 `gui/`에 있습니다. |
 | `gui/` | 관리 창 소스(Rust + Slint)입니다. |
@@ -193,7 +208,8 @@ powershell -ExecutionPolicy Bypass -File C:\ProgramData\TailscaleAutoConnect\uni
 
 ## 릴리스 만들기
 
-Rust(MSVC)와 PowerShell 7이 필요합니다. 버전은 `gui/Cargo.toml`, `gui/app.rc`, `gui/app.manifest`, `install.ps1`의 `$version`을 함께 올립니다.
+Rust(MSVC)와 PowerShell 7이 필요합니다. 버전은 `gui/Cargo.toml`, `gui/app.rc`, `gui/app.manifest`, `gui/ui/app.slint`의 `version`, `install.ps1`의 `$version`을 함께 올립니다.
+관리 창은 태그(`vX.Y.Z`)와 `Cargo.toml` 버전을 비교해 새 버전을 알리므로, 태그와 버전이 일치해야 합니다. 업데이트는 릴리스 asset의 SHA-256 기록을 확인하므로, asset은 `gh release create`나 웹 화면으로 올립니다.
 
 ```bash
 git tag vX.Y.Z && git push origin vX.Y.Z
