@@ -12,7 +12,8 @@
 #   PowerShell: $env:TFC_RECONNECT_AFTER='30m'; irm https://jeiel85.github.io/tailscale-force-connect/get.ps1 | iex
 #
 # Downloads the latest release zip from GitHub, extracts it to a temp folder,
-# runs install.ps1 (which asks for administrator rights), then deletes the temp folder.
+# runs install.ps1 (which asks for administrator rights and installs the management window
+# to Program Files first), opens that window, then deletes the temp folder.
 # On failure it throws, so `powershell -c "..."` exits with a non-zero code.
 # Keep this file ASCII-only: Invoke-RestMethod may not decode it as UTF-8.
 # Do not use 'exit' here: the script runs inside the caller's session via iex.
@@ -48,6 +49,13 @@ function Invoke-TailscaleForceConnectInstall {
         Write-Host 'Running install.ps1 (a UAC prompt will appear)...'
         & powershell.exe @installArgs
         if ($LASTEXITCODE -ne 0) { throw "install.ps1 failed with exit code $LASTEXITCODE." }
+
+        # Open the management window that install.ps1 put in Program Files (as the current user, not elevated).
+        $gui = Join-Path $env:ProgramFiles 'Tailscale Force Connect\TailscaleForceConnect.exe'
+        if (Test-Path -LiteralPath $gui) {
+            Write-Host 'Opening Tailscale Force Connect (also in the Start menu).'
+            Start-Process -FilePath $gui
+        }
     } catch {
         Write-Error "tailscale-force-connect install failed: $($_.Exception.Message)"
     } finally {

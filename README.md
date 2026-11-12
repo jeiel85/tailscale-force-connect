@@ -35,6 +35,21 @@ Tailscale Windows 클라이언트 **1.84 이상**에는 비슷한 목적의 [시
 공식 `ReconnectAfter` 정책도 시험해 봤습니다. 정책은 적용됐지만(`tailscale syspolicy list`에 표시), `tailscale down` 뒤 1~2분이 지나도
 다시 연결되지 않았습니다. 그래서 이 도구는 정책에 기대지 않고 상태를 직접 확인합니다. 정책이 잘 동작하는 환경이라면 정책을 쓰는 편이 더 단순합니다.
 
+## 관리 창
+
+설치하면 **Tailscale Force Connect** 관리 창이 함께 설치되고, 시작 메뉴에서 열 수 있습니다. 트레이에 상주하지 않고 열었을 때만 동작합니다.
+
+- 지금 연결 상태와 Tailscale 기기 이름·IP
+- 부팅 시 자동 연결, 직접 끊은 뒤 자동 재연결 설정. 끊긴 상태라면 몇 분 뒤 다시 연결되는지도 보여 줍니다.
+- 최근 기록(`connect.log`)
+- 버튼: 재연결 시간 바꾸기, 동작 확인, 제거. 이 버튼을 누를 때만 UAC 창이 뜹니다.
+
+창을 여는 것만으로는 관리자 권한이 필요 없습니다. 상태는 일반 권한으로 읽을 수 있는 정보(`tailscale status`, `settings.json`, `connect.log`)만 씁니다.
+버튼은 `C:\Program Files\Tailscale Force Connect\`에 있는 스크립트를 관리자 권한으로 실행합니다. 이 폴더는 관리자만 쓸 수 있습니다.
+Rust와 [Slint](https://slint.dev)로 만들었고(소프트웨어 렌더러), GPU가 없는 환경이나 원격 데스크톱에서도 그려집니다. 실행 파일은 약 8MB입니다.
+
+> **원격으로 접속 중이라면** "동작 확인"을 누르지 마세요. 연결을 몇 초 끊었다가 다시 연결되는지 보는 기능이라, 그 사이 원격 연결이 끊깁니다.
+
 ## 설치
 
 필요한 것: Windows 10/11, Tailscale에 로그인한 상태(로그인되어 있지 않으면 설치가 멈추지 않고 바로 실패합니다), 관리자 권한. Tailscale 설치 위치는 서비스 등록 정보에서 찾으므로 기본 경로가 아니어도 됩니다.
@@ -46,13 +61,13 @@ Tailscale Windows 클라이언트 **1.84 이상**에는 비슷한 목적의 [시
 powershell -c "irm https://jeiel85.github.io/tailscale-force-connect/get.ps1 | iex"
 ```
 
-[`get.ps1`](docs/get.ps1)이 [최신 릴리스](https://github.com/jeiel85/tailscale-force-connect/releases/latest) zip을 임시 폴더에 받아 `install.ps1`을 실행하고,
-끝나면 임시 폴더를 지웁니다. 인터넷에서 받은 스크립트를 바로 실행하는 방식이니, 먼저 내용을 읽어 보고 싶다면 방법 2를 쓰세요.
+[`get.ps1`](docs/get.ps1)이 [최신 릴리스](https://github.com/jeiel85/tailscale-force-connect/releases/latest) zip을 임시 폴더에 받아 `install.ps1`을 실행합니다.
+`install.ps1`은 먼저 관리 창을 Program Files에 설치하고 나서 예약 작업을 등록합니다. 다 끝나면 관리 창을 열고 임시 폴더를 지웁니다. 인터넷에서 받은 스크립트를 바로 실행하는 방식이니, 먼저 내용을 읽어 보고 싶다면 방법 2를 쓰세요.
 
 **방법 2. zip 받아서 더블클릭**
 
 1. [`tailscale-force-connect.zip`](https://github.com/jeiel85/tailscale-force-connect/releases/latest/download/tailscale-force-connect.zip)을 받아 압축을 풉니다.
-2. `install.cmd`를 더블클릭합니다.
+2. `install.cmd`를 더블클릭합니다. `TailscaleForceConnect.exe`를 바로 열어 "설치하기"를 눌러도 됩니다.
 
 "Windows의 PC 보호" 창이 뜨면 **추가 정보 → 실행**을 누르세요. 서명하지 않은 스크립트라서 뜨는 경고입니다.
 
@@ -96,6 +111,9 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1
 | `install.ps1` | `connect.ps1`을 `C:\ProgramData\TailscaleAutoConnect\`에 복사하고, Unattended 모드를 켜고, 이벤트 로그 원본과 예약 작업 2개(부팅 시 연결, 자동 재연결 감시)를 등록한 뒤 동작을 확인합니다. |
 | `uninstall.ps1` | 예약 작업 2개, 설치 폴더, 이벤트 로그 원본을 지우고 결과를 보여 줍니다. Tailscale 본체와 Unattended 설정은 건드리지 않습니다. |
 | `install.cmd`, `uninstall.cmd` | 더블클릭용 실행 파일입니다. 같은 폴더의 `.ps1`을 실행합니다. |
+| `TailscaleForceConnect.exe` | 관리 창입니다(릴리스 zip에만 들어 있음). 소스는 `gui/`에 있습니다. |
+| `gui/` | 관리 창 소스(Rust + Slint)입니다. |
+| `scripts/build-release.ps1` | 관리 창을 빌드하고 릴리스 zip을 만듭니다. |
 | `docs/get.ps1`, `docs/remove.ps1` | 한 줄 설치·제거용 스크립트입니다. GitHub Pages로 배포되며, 릴리스 zip에는 들어가지 않습니다. |
 
 설치되는 것:
@@ -106,12 +124,14 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1
   로그인이 필요한 상태처럼 `tailscale up`으로 풀 수 없는 상태는 건드리지 않습니다.
 - 이벤트 로그 원본 **`TailscaleForceConnect`**(응용 프로그램 로그): 부팅할 때마다 결과를 남깁니다. ID `1000` 연결됨(정보), `1004` 직접 끊은 뒤 자동 재연결(정보),
   `1001` 10분 안에 연결 실패, `1002` 로그인 필요, `1003` `tailscale.exe` 없음(이상 오류).
+- 폴더 `C:\Program Files\Tailscale Force Connect\`: 관리 창과 스크립트 원본입니다. 시작 메뉴 바로가기 **Tailscale Force Connect**도 만듭니다.
 - 폴더 `C:\ProgramData\TailscaleAutoConnect\`: SYSTEM과 Administrators만 쓸 수 있고 Users는 읽기만 할 수 있습니다.
   SYSTEM이 실행하는 스크립트를 일반 사용자가 바꾸지 못하게 하려는 설정입니다.
   - `connect.ps1`
   - `uninstall.ps1`: 한 줄로 설치했을 때도 제거할 수 있도록 함께 복사해 둡니다.
   - `connect.log`: 부팅할 때마다 남는 실행 기록입니다. 200KB를 넘으면 최근 500줄만 남깁니다.
   - `install.log`: 마지막 설치 결과입니다.
+  - `settings.json`: 버전과 자동 재연결 시간입니다. 관리 창이 관리자 권한 없이 읽습니다.
 
 ## 확인과 문제 해결
 
@@ -162,7 +182,8 @@ powershell -c "irm https://jeiel85.github.io/tailscale-force-connect/remove.ps1 
 
 [`remove.ps1`](docs/remove.ps1)은 설치할 때 복사해 둔 `C:\ProgramData\TailscaleAutoConnect\uninstall.ps1`을 실행합니다.
 그 파일이 없으면 최신 릴리스 zip을 받아 그 안의 `uninstall.ps1`을 실행합니다.
-예약 작업 2개, 설치 폴더, 이벤트 로그 원본을 지우고 결과를 보여 줍니다. 그 밖의 Tailscale 설정은 그대로 남습니다.
+예약 작업 2개, 설치 폴더, 관리 창과 시작 메뉴 바로가기, 이벤트 로그 원본을 지우고 결과를 보여 줍니다. 그 밖의 Tailscale 설정은 그대로 남습니다.
+관리 창의 "제거" 버튼을 두 번 눌러도 됩니다(창이 닫히고 결과 창이 뜹니다).
 
 인터넷을 쓰지 않으려면 zip이나 git으로 받은 폴더에서 `uninstall.cmd`를 더블클릭하거나 아래 명령을 실행하세요.
 
@@ -172,16 +193,18 @@ powershell -ExecutionPolicy Bypass -File C:\ProgramData\TailscaleAutoConnect\uni
 
 ## 릴리스 만들기
 
-설치에 필요한 파일만 담은 zip은 `git archive`로 만듭니다. 무엇을 뺄지는 `.gitattributes`의 `export-ignore`가 정합니다.
+Rust(MSVC)와 PowerShell 7이 필요합니다. 버전은 `gui/Cargo.toml`, `gui/app.rc`, `gui/app.manifest`, `install.ps1`의 `$version`을 함께 올립니다.
 
 ```bash
 git tag vX.Y.Z && git push origin vX.Y.Z
-git archive --format=zip --prefix=tailscale-force-connect/ -o tailscale-force-connect.zip vX.Y.Z
-gh release create vX.Y.Z tailscale-force-connect.zip --title vX.Y.Z --notes "..."
+pwsh -File scripts/build-release.ps1 -Ref vX.Y.Z   # dist/tailscale-force-connect.zip
+gh release create vX.Y.Z dist/tailscale-force-connect.zip --title vX.Y.Z --notes "..."
 ```
+
+`build-release.ps1`은 관리 창을 릴리스 빌드하고, `git archive`로 설치에 필요한 파일만 꺼낸 뒤(무엇을 뺄지는 `.gitattributes`의 `export-ignore`가 정함) 실행 파일을 넣어 zip을 만듭니다.
 
 한 줄 설치와 다운로드 링크는 `releases/latest`를 가리키므로 asset 이름은 항상 `tailscale-force-connect.zip`으로 둡니다.
 
 ## 라이선스
 
-[MIT](LICENSE)
+[MIT](LICENSE). 배포하는 관리 창 실행 파일은 [Slint](https://slint.dev)를 Royalty-free 2.0 라이선스로 사용합니다(창 바닥글의 "Made with Slint"). 자세한 내용은 [DECISIONS.md](DECISIONS.md)에 있습니다.

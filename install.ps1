@@ -11,6 +11,10 @@ $taskName    = 'Tailscale Auto Connect'
 $eventSource = 'TailscaleForceConnect'
 $logFile     = Join-Path $dir 'install.log'
 $watchTask   = 'Tailscale Auto Reconnect'
+$version     = '1.3.0'
+$appDir      = Join-Path $env:ProgramFiles 'Tailscale Force Connect'   # 관리 앱(GUI)과 스크립트 원본
+$appExe      = 'TailscaleForceConnect.exe'
+$shortcut    = Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu\Programs\Tailscale Force Connect.lnk'
 
 # 직접 끊은 뒤 다시 연결할 때까지의 시간. 30m, 1h, 1h30m처럼 h·m 단위로 받는다. 0이면 감시 작업을 만들지 않는다.
 $ReconnectAfter = $ReconnectAfter.Trim().ToLower()
@@ -144,6 +148,32 @@ try {
         throw "Tailscale 상태가 '$state0'입니다. Tailscale에 로그인한 뒤 다시 설치하세요."
     }
 
+    # 0-1) 관리 앱 설치: GUI와 스크립트 원본을 Program Files(관리자만 쓸 수 있는 곳)에 두고 시작 메뉴 바로가기를 만든다.
+    #      GUI의 설치·제거 버튼은 여기 있는 스크립트를 관리자 권한으로 실행한다. GUI가 여기서 실행한 경우에는 복사하지 않는다.
+    $srcExe  = Join-Path $PSScriptRoot $appExe
+    $fromApp = ([IO.Path]::GetFullPath($PSScriptRoot).TrimEnd('\') -ieq [IO.Path]::GetFullPath($appDir).TrimEnd('\'))
+    if ($fromApp) {
+        Write-Report "관리 앱: $appDir"
+    } elseif (Test-Path -LiteralPath $srcExe) {
+        # 업데이트할 때 관리 창이 열려 있으면 실행 파일을 덮어쓸 수 없으므로 닫는다.
+        $running = Get-Process -Name ([IO.Path]::GetFileNameWithoutExtension($appExe)) -ErrorAction SilentlyContinue |
+            Where-Object { $_.Path -and ($_.Path -ieq (Join-Path $appDir $appExe)) }
+        if ($running) { $running | Stop-Process -Force; Start-Sleep -Seconds 1; Write-Report '열려 있던 관리 창을 닫음 (업데이트)' }
+        New-Item -ItemType Directory -Force -Path $appDir | Out-Null
+        foreach ($f in $appExe, 'install.ps1', 'uninstall.ps1', 'connect.ps1') {
+            Copy-Item -LiteralPath (Join-Path $PSScriptRoot $f) -Destination $appDir -Force
+        }
+        $wsh = New-Object -ComObject WScript.Shell
+        $lnk = $wsh.CreateShortcut($shortcut)
+        $lnk.TargetPath = Join-Path $appDir $appExe
+        $lnk.WorkingDirectory = $appDir
+        $lnk.Description = 'Tailscale 자동 연결 상태 보기·설정'
+        $lnk.Save()
+        Write-Report "관리 앱 설치: $appDir (시작 메뉴: Tailscale Force Connect)"
+    } else {
+        Write-Report '관리 앱: 패키지에 없어 건너뜀 (스크립트만 설치)'
+    }
+
     # 1) 스크립트 복사 (새 파일은 폴더의 제한된 ACL을 물려받는다)
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'connect.ps1') -Destination $dir -Force
     # 한 줄 설치로 받은 경우 내려받은 폴더가 지워지므로 제거 스크립트도 함께 둔다.
@@ -193,6 +223,11 @@ try {
         Remove-Item -LiteralPath (Join-Path $dir 'stopped-since.txt') -Force -ErrorAction SilentlyContinue
         Write-Report "자동 재연결: 직접 끊으면 약 $reconnectMinutes 분 뒤 다시 연결 (예약 작업 $watchTask, $interval 분마다 확인)"
     }
+
+    # 4-2) 관리 창이 관리자 권한 없이 읽을 수 있는 설정 요약 (폴더 ACL상 Users는 읽기만 가능)
+    $settings = [ordered]@{ version = $version; reconnectMinutes = $reconnectMinutes; installedAt = (Get-Date).ToString('s') }
+    Set-Content -LiteralPath (Join-Path $dir 'settings.json') -Value ($settings | ConvertTo-Json) -Encoding UTF8
+    Write-Report "설정 기록: $dir\settings.json (v$version)"
 
     # 빠른 시작이 켜져 있으면 '종료 → 전원 켜기'는 최대 절전 복귀라 시작 시 작업이 실행되지 않는다.
     $hiberboot = (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Power' -Name HiberbootEnabled -ErrorAction SilentlyContinue).HiberbootEnabled

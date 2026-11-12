@@ -172,6 +172,11 @@
   .no { color: var(--muted); font-weight: 700; }
   .table-scroll { overflow-x: auto; }
 
+  .manager { display: grid; grid-template-columns: minmax(0, 300px) 1fr; gap: 28px; align-items: start; }
+  .manager img { width: 100%; height: auto; border-radius: 12px; border: 1px solid var(--rule); box-shadow: 0 18px 40px -26px rgba(20, 32, 43, .55); }
+  .manager ul { margin: 0; padding-left: 18px; display: grid; gap: 8px; }
+  .manager li { color: var(--muted); font-size: 15.5px; }
+  .manager li strong { color: var(--ink); font-weight: 500; }
   .facts { margin: 0; display: grid; gap: 18px; }
   .facts div { display: grid; grid-template-columns: 200px 1fr; gap: 16px; padding-bottom: 18px; border-bottom: 1px solid var(--rule); }
   .facts dt { font-family: "IBM Plex Mono", monospace; font-size: 14px; font-weight: 500; }
@@ -180,6 +185,10 @@
   footer { border-top: 1px solid var(--rule); padding: 32px 0 48px; font-size: 14px; color: var(--muted); }
   footer .wrap { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 12px; }
 
+  @media (max-width: 640px) {
+    .manager { grid-template-columns: 1fr; }
+    .manager img { max-width: 320px; }
+  }
   @media (max-width: 860px) {
     .hero { grid-template-columns: 1fr; gap: 40px; padding-block: 48px 64px; }
     .block-grid { grid-template-columns: 1fr; gap: 20px; }
@@ -234,6 +243,25 @@
       <p class="device-note">실제 <span class="mono">connect.log</span> 형식을 그대로 흉내 낸 시뮬레이션입니다. 20초 대기는 줄여서 보여 줍니다.</p>
     </div>
   </div>
+
+  <section class="block" id="manager" aria-labelledby="h-manager">
+    <div class="wrap block-grid">
+      <div>
+        <h2 id="h-manager">관리 창</h2>
+        <p class="side-note">설치하면 시작 메뉴에 <strong>Tailscale Force Connect</strong>가 생깁니다. 트레이에 상주하지 않고, 열었을 때만 동작합니다.</p>
+      </div>
+      <div class="manager">
+        <img src="manager.png" width="516" height="759" alt="관리 창: 연결됨 상태, 부팅할 때 자동으로 연결, 직접 끊으면 1시간 뒤 다시 연결, 자동 재연결 시간 선택과 적용 버튼, 최근 기록">
+        <ul>
+          <li><strong>지금 상태</strong>: 연결 여부, Tailscale 기기 이름과 IP. 끊겨 있으면 몇 분 뒤 다시 연결되는지 보여 줍니다.</li>
+          <li><strong>설정</strong>: 직접 끊은 뒤 다시 연결할 시간을 고르고 적용합니다. 이때만 UAC 창이 뜹니다.</li>
+          <li><strong>최근 기록</strong>: 부팅 때마다, 자동 재연결 때마다 남는 기록을 봅니다.</li>
+          <li><strong>제거</strong>: 버튼을 두 번 누르면 모두 지웁니다.</li>
+          <li>Rust와 Slint로 만든 약 8MB짜리 실행 파일입니다. GPU 없이 그려서 원격 데스크톱에서도 열립니다.</li>
+        </ul>
+      </div>
+    </div>
+  </section>
 
   <section class="block" id="install" aria-labelledby="h-install">
     <div class="wrap block-grid">
@@ -295,6 +323,7 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1</code></pre><button type=
         <p class="side-note">모두 <a href="#remove">한 줄로 제거</a>할 수 있습니다.</p>
       </div>
       <dl class="facts">
+        <div><dt>관리 창</dt><dd><code>C:\Program Files\Tailscale Force Connect\</code>에 관리 창과 스크립트 원본을 두고 시작 메뉴 바로가기를 만듭니다. 이 폴더는 관리자만 쓸 수 있습니다.</dd></div>
         <div><dt>예약 작업</dt><dd><code>Tailscale Auto Connect</code>: 부팅하고 20초 뒤 SYSTEM으로 실행합니다. 연결될 때까지 10초 간격으로 최대 10분 동안 <code>tailscale up</code>을 시도합니다.</dd></div>
         <div><dt>스크립트 폴더</dt><dd><code>C:\ProgramData\TailscaleAutoConnect\</code>: 관리자만 고칠 수 있고, 일반 사용자는 읽기만 할 수 있습니다.</dd></div>
         <div><dt>로그</dt><dd>같은 폴더의 <code>connect.log</code>와 이벤트 뷰어의 응용 프로그램 로그(원본 <code>TailscaleForceConnect</code>)에 부팅할 때마다 결과가 남습니다. 연결 실패나 로그인이 필요한 상황(키 만료)은 오류로 기록됩니다.</dd></div>
@@ -329,7 +358,7 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1</code></pre><button type=
 
 <footer>
   <div class="wrap">
-    <span>Tailscale Inc.와 관계없는 비공식 도구입니다. MIT 라이선스.</span>
+    <span>Tailscale Inc.와 관계없는 비공식 도구입니다. MIT 라이선스. 관리 창은 <a href="https://slint.dev">Made with Slint</a>.</span>
     <a href="https://github.com/jeiel85/tailscale-force-connect">github.com/jeiel85/tailscale-force-connect</a>
   </div>
 </footer>

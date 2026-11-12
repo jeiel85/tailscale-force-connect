@@ -1,0 +1,557 @@
+import { Button, ComboBox, CheckBox, Palette } from "std-widgets.slint";
+
+// 랜딩 페이지와 같은 색 체계. 밝은/어두운 테마는 시스템 설정을 따른다.
+export global Theme {
+    out property <bool> dark: Palette.color-scheme == ColorScheme.dark;
+    out property <color> bg: dark ? #0F151A : #EDF1F4;
+    out property <color> card: dark ? #172028 : #FFFFFF;
+    out property <color> card-border: dark ? #25313B : #DAE1E7;
+    out property <color> chip: dark ? #1E2932 : #F2F5F8;
+    out property <color> ink: dark ? #E6ECF0 : #14202B;
+    out property <color> muted: dark ? #93A2AE : #56646F;
+    out property <color> green: dark ? #3CC293 : #1B8F69;
+    out property <color> amber: dark ? #F0A63A : #C9821A;
+    out property <color> red: dark ? #F07A6A : #C2412D;
+    out property <color> grey: dark ? #5E6C77 : #9AA6B0;
+    out property <color> screen: #0E161D;
+    out property <color> screen-ink: #CFE3D8;
+    out property <color> screen-dim: #6A857A;
+}
+
+component Card inherits Rectangle {
+    background: Theme.card;
+    border-radius: 14px;
+    border-width: 1px;
+    border-color: Theme.card-border;
+}
+
+component SectionTitle inherits Text {
+    color: Theme.muted;
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0.4px;
+}
+
+component Led inherits Rectangle {
+    in property <color> tint;
+    width: 20px;
+    height: 20px;
+    border-radius: 10px;
+    background: tint;
+    drop-shadow-blur: 14px;
+    drop-shadow-color: tint.with-alpha(0.65);
+}
+
+component Chip inherits Rectangle {
+    in property <string> label;
+    in property <string> value;
+    in property <color> dot;
+    border-radius: 10px;
+    background: Theme.chip;
+    horizontal-stretch: 1;
+    HorizontalLayout {
+        padding: 12px;
+        spacing: 10px;
+        VerticalLayout {
+            alignment: center;
+            Rectangle {
+                width: 8px;
+                height: 8px;
+                border-radius: 4px;
+                background: dot;
+            }
+        }
+        VerticalLayout {
+            spacing: 2px;
+            Text {
+                text: label;
+                color: Theme.muted;
+                font-size: 11px;
+            }
+            Text {
+                text: value;
+                color: Theme.ink;
+                font-size: 13px;
+                font-weight: 700;
+                wrap: word-wrap;
+            }
+        }
+    }
+}
+
+// Fluent 강조색(시스템 색)은 바꿀 수 없어서, 주 버튼만 브랜드 초록으로 직접 그린다.
+component PrimaryButton inherits Rectangle {
+    in property <string> text;
+    in property <bool> enabled: true;
+    callback clicked();
+    accessible-role: button;
+    accessible-label: root.text;
+    accessible-enabled: root.enabled;
+    accessible-action-default => {
+        if (root.enabled) {
+            root.clicked();
+        }
+    }
+    min-width: max(88px, label.preferred-width + 36px);
+    min-height: 34px;
+    border-radius: 7px;
+    background: !root.enabled ? Theme.grey.with-alpha(0.5)
+        : touch.pressed ? Theme.green.darker(0.18)
+        : touch.has-hover ? Theme.green.brighter(0.1)
+        : Theme.green;
+    border-width: focus.has-focus ? 2px : 0px;
+    border-color: Theme.ink;
+    label := Text {
+        text: root.text;
+        color: Theme.dark ? #08130E : #FFFFFF;
+        font-weight: 700;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+    focus := FocusScope {
+        enabled: root.enabled;
+        key-pressed(event) => {
+            if (event.text == " " || event.text == Key.Return) {
+                root.clicked();
+                return accept;
+            }
+            return reject;
+        }
+    }
+    touch := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: pointer;
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+component LinkText inherits Rectangle {
+    in property <string> text;
+    in property <length> font-size: 12px;
+    callback clicked();
+    min-width: label.preferred-width;
+    min-height: label.preferred-height;
+    label := Text {
+        text: root.text;
+        font-size: root.font-size;
+        color: touch.has-hover ? Theme.ink : Theme.muted;
+    }
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+export component AppWindow inherits Window {
+    title: "Tailscale Force Connect";
+    icon: @image-url("../assets/icon.png");
+    preferred-width: 500px;
+    preferred-height: 720px;
+    min-width: 440px;
+    min-height: 620px;
+    background: Theme.bg;
+    default-font-family: "Malgun Gothic";
+    default-font-size: 14px;
+
+    in property <string> version: "1.3.0";
+    in property <bool> installed;
+    // running | stopped | login | missing | unknown
+    in property <string> state: "unknown";
+    in property <string> state-title: "확인하는 중…";
+    in property <string> state-detail;
+    in property <string> boot-text: "확인하는 중…";
+    in property <string> reconnect-text: "확인하는 중…";
+    in property <bool> reconnect-on;
+    in property <bool> fast-startup;
+    in property <[string]> log-lines;
+    in property <[string]> reconnect-options: ["끄기", "30분", "1시간", "2시간", "4시간"];
+    in-out property <int> reconnect-index: 2;
+    in-out property <bool> run-test: false;
+    in property <bool> busy;
+    in property <string> busy-text;
+    in property <bool> result-visible;
+    in property <bool> result-ok;
+    in property <string> result-title;
+    in property <string> result-text;
+    in-out property <bool> confirm-uninstall;
+
+    callback install();
+    callback apply-reconnect();
+    callback verify();
+    callback uninstall();
+    callback open-logs();
+    callback open-url(string);
+    callback dismiss-result();
+
+    property <color> state-color: root.state == "running" ? Theme.green
+        : root.state == "stopped" ? Theme.amber
+        : (root.state == "login" || root.state == "missing") ? Theme.red
+        : Theme.grey;
+
+    // 제거 버튼은 두 번 눌러야 한다. 4초 안에 다시 누르지 않으면 원래대로 돌아간다.
+    Timer {
+        interval: 4s;
+        running: root.confirm-uninstall;
+        triggered => {
+            root.confirm-uninstall = false;
+        }
+    }
+
+    VerticalLayout {
+        padding: 20px;
+        spacing: 14px;
+
+        // 머리글
+        HorizontalLayout {
+            spacing: 10px;
+            Image {
+                source: @image-url("../assets/icon.png");
+                width: 26px;
+                height: 26px;
+            }
+            VerticalLayout {
+                alignment: center;
+                Text {
+                    text: "Tailscale Force Connect";
+                    font-size: 15px;
+                    font-weight: 700;
+                    color: Theme.ink;
+                }
+            }
+            Rectangle {
+                horizontal-stretch: 1;
+            }
+            VerticalLayout {
+                alignment: center;
+                Text {
+                    text: "v" + root.version;
+                    color: Theme.muted;
+                    font-size: 12px;
+                }
+            }
+        }
+
+        // 현재 상태
+        Card {
+            VerticalLayout {
+                padding: 20px;
+                spacing: 16px;
+                HorizontalLayout {
+                    spacing: 16px;
+                    VerticalLayout {
+                        alignment: center;
+                        Led {
+                            tint: root.state-color;
+                        }
+                    }
+                    VerticalLayout {
+                        spacing: 2px;
+                        alignment: center;
+                        Text {
+                            text: root.state-title;
+                            font-size: 26px;
+                            font-weight: 800;
+                            color: Theme.ink;
+                        }
+                        Text {
+                            text: root.state-detail;
+                            color: Theme.muted;
+                            font-size: 13px;
+                            wrap: word-wrap;
+                        }
+                    }
+                }
+                HorizontalLayout {
+                    spacing: 10px;
+                    Chip {
+                        label: "부팅할 때";
+                        value: root.boot-text;
+                        dot: root.installed ? Theme.green : Theme.grey;
+                    }
+                    Chip {
+                        label: "직접 끊으면";
+                        value: root.reconnect-text;
+                        dot: root.reconnect-on ? Theme.green : Theme.grey;
+                    }
+                }
+            }
+        }
+
+        // 설치된 경우: 자동 재연결 설정
+        if root.installed: Card {
+            VerticalLayout {
+                padding: 18px;
+                spacing: 10px;
+                SectionTitle {
+                    text: "직접 끊은 뒤 자동 재연결";
+                }
+                Text {
+                    text: "트레이에서 Disconnect를 눌러도 이 시간이 지나면 다시 연결합니다. 5분마다 확인하므로 몇 분 늦을 수 있습니다.";
+                    color: Theme.muted;
+                    font-size: 13px;
+                    wrap: word-wrap;
+                }
+                HorizontalLayout {
+                    spacing: 10px;
+                    ComboBox {
+                        model: root.reconnect-options;
+                        current-index <=> root.reconnect-index;
+                        enabled: !root.busy;
+                        horizontal-stretch: 1;
+                    }
+                    PrimaryButton {
+                        text: "적용";
+                        enabled: !root.busy;
+                        clicked => {
+                            root.apply-reconnect();
+                        }
+                    }
+                }
+                HorizontalLayout {
+                    spacing: 10px;
+                    Button {
+                        text: "동작 확인";
+                        enabled: !root.busy;
+                        clicked => {
+                            root.verify();
+                        }
+                    }
+                    VerticalLayout {
+                        alignment: center;
+                        Text {
+                            text: "연결을 몇 초 끊었다가 다시 연결되는지 봅니다. 원격으로 접속 중이면 누르지 마세요.";
+                            color: Theme.muted;
+                            font-size: 12px;
+                            wrap: word-wrap;
+                        }
+                    }
+                }
+            }
+        }
+
+        // 설치되지 않은 경우: 설치
+        if !root.installed: Card {
+            VerticalLayout {
+                padding: 18px;
+                spacing: 12px;
+                SectionTitle {
+                    text: "설치";
+                }
+                Text {
+                    text: "부팅할 때마다 Tailscale을 다시 연결하는 예약 작업을 등록합니다. 관리자 권한(UAC)이 한 번 필요합니다.";
+                    color: Theme.muted;
+                    font-size: 13px;
+                    wrap: word-wrap;
+                }
+                HorizontalLayout {
+                    spacing: 10px;
+                    VerticalLayout {
+                        alignment: center;
+                        Text {
+                            text: "직접 끊으면 다시 연결까지";
+                            color: Theme.ink;
+                            font-size: 13px;
+                        }
+                    }
+                    ComboBox {
+                        model: root.reconnect-options;
+                        current-index <=> root.reconnect-index;
+                        enabled: !root.busy;
+                        horizontal-stretch: 1;
+                    }
+                }
+                CheckBox {
+                    text: "설치 후 동작 확인 (연결이 몇 초 끊김 · 원격 접속 중이면 끄세요)";
+                    checked <=> root.run-test;
+                    enabled: !root.busy;
+                }
+                PrimaryButton {
+                    text: "설치하기";
+                    enabled: !root.busy && root.state != "missing";
+                    clicked => {
+                        root.install();
+                    }
+                }
+            }
+        }
+
+        // 빠른 시작 경고
+        if root.fast-startup: Rectangle {
+            border-radius: 12px;
+            background: Theme.amber.with-alpha(0.13);
+            border-width: 1px;
+            border-color: Theme.amber.with-alpha(0.45);
+            HorizontalLayout {
+                padding: 12px;
+                spacing: 10px;
+                VerticalLayout {
+                    alignment: start;
+                    Rectangle {
+                        width: 8px;
+                        height: 8px;
+                        border-radius: 4px;
+                        background: Theme.amber;
+                    }
+                }
+                Text {
+                    text: "Windows 빠른 시작이 켜져 있습니다. '종료 후 전원 켜기'에서는 부팅 시 연결이 실행되지 않습니다(재시작·정전 뒤에는 동작). 제어판 > 전원 옵션에서 끌 수 있습니다.";
+                    color: Theme.ink;
+                    font-size: 12px;
+                    wrap: word-wrap;
+                    horizontal-stretch: 1;
+                }
+            }
+        }
+
+        // 마지막 작업 결과
+        if root.result-visible: Rectangle {
+            border-radius: 12px;
+            background: (root.result-ok ? Theme.green : Theme.red).with-alpha(0.12);
+            border-width: 1px;
+            border-color: (root.result-ok ? Theme.green : Theme.red).with-alpha(0.45);
+            VerticalLayout {
+                padding: 14px;
+                spacing: 6px;
+                HorizontalLayout {
+                    Text {
+                        text: root.result-title;
+                        font-weight: 700;
+                        color: Theme.ink;
+                        horizontal-stretch: 1;
+                    }
+                    LinkText {
+                        text: "닫기";
+                        clicked => {
+                            root.dismiss-result();
+                        }
+                    }
+                }
+                Text {
+                    text: root.result-text;
+                    color: Theme.ink;
+                    font-size: 12px;
+                    wrap: word-wrap;
+                }
+            }
+        }
+
+        // 최근 기록 (connect.log)
+        Card {
+            vertical-stretch: 1;
+            min-height: 150px;
+            VerticalLayout {
+                padding: 16px;
+                spacing: 10px;
+                HorizontalLayout {
+                    SectionTitle {
+                        text: "최근 기록";
+                        horizontal-stretch: 1;
+                    }
+                    LinkText {
+                        text: "로그 폴더 열기";
+                        clicked => {
+                            root.open-logs();
+                        }
+                    }
+                }
+                Rectangle {
+                    background: Theme.screen;
+                    border-radius: 10px;
+                    clip: true;
+                    vertical-stretch: 1;
+                    VerticalLayout {
+                        padding: 12px;
+                        spacing: 3px;
+                        alignment: end;
+                        if root.log-lines.length == 0: Text {
+                            text: "아직 기록이 없습니다.";
+                            color: Theme.screen-dim;
+                            font-size: 12px;
+                        }
+                        for line in root.log-lines: Text {
+                            text: line;
+                            color: Theme.screen-ink;
+                            font-family: "Consolas";
+                            font-size: 12px;
+                            wrap: word-wrap;
+                        }
+                    }
+                }
+            }
+        }
+
+        // 바닥글
+        HorizontalLayout {
+            spacing: 14px;
+            if root.installed: Button {
+                text: root.confirm-uninstall ? "한 번 더 누르면 제거합니다" : "제거";
+                enabled: !root.busy;
+                clicked => {
+                    if (root.confirm-uninstall) {
+                        root.confirm-uninstall = false;
+                        root.uninstall();
+                    } else {
+                        root.confirm-uninstall = true;
+                    }
+                }
+            }
+            Rectangle {
+                horizontal-stretch: 1;
+            }
+            VerticalLayout {
+                alignment: center;
+                LinkText {
+                    text: "GitHub";
+                    clicked => {
+                        root.open-url("https://github.com/jeiel85/tailscale-force-connect");
+                    }
+                }
+            }
+            VerticalLayout {
+                alignment: center;
+                LinkText {
+                    text: "Made with Slint";
+                    clicked => {
+                        root.open-url("https://slint.dev");
+                    }
+                }
+            }
+        }
+    }
+
+    // 관리자 권한 작업 중에는 화면을 덮어 다른 조작을 막는다.
+    if root.busy: Rectangle {
+        width: 100%;
+        height: 100%;
+        background: Theme.dark ? #000000b0 : #14202B90;
+        TouchArea { }
+        Rectangle {
+            width: min(parent.width - 60px, 360px);
+            height: busy-layout.preferred-height;
+            border-radius: 14px;
+            background: Theme.card;
+            drop-shadow-blur: 24px;
+            drop-shadow-color: #00000060;
+            busy-layout := VerticalLayout {
+                padding: 22px;
+                spacing: 8px;
+                Text {
+                    text: "잠시만 기다려 주세요";
+                    font-size: 16px;
+                    font-weight: 700;
+                    color: Theme.ink;
+                }
+                Text {
+                    text: root.busy-text;
+                    color: Theme.muted;
+                    font-size: 13px;
+                    wrap: word-wrap;
+                }
+            }
+        }
+    }
+}
