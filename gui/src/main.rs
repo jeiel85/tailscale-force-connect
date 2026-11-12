@@ -51,7 +51,25 @@ struct Snapshot {
     fast_startup: bool,
 }
 
+/// Windows 알림의 앱 ID. install.ps1이 시작 메뉴 바로가기에 같은 값을 기록한다.
+const APP_ID: &str = "TailscaleForceConnect.Manager";
+
 fn main() -> Result<(), slint::PlatformError> {
+    // 창 없이 동작하는 모드. 예약 작업 'Tailscale Force Connect Update Check'가 --notify-update로 실행한다.
+    // (알림을 눌러 tailscale-force-connect: 링크로 열리면 인자가 붙지만, 그때는 평소처럼 창을 연다.)
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.iter().any(|a| a == "--notify-update") {
+        notify_if_update_available();
+        return Ok(());
+    }
+    if args.iter().any(|a| a == "--notify-test") {
+        show_toast(
+            "Tailscale Force Connect 알림 시험",
+            "새 버전이 나오면 이렇게 알려 드립니다. 누르면 관리 창이 열립니다.",
+        );
+        return Ok(());
+    }
+
     let ui = AppWindow::new()?;
     ui.set_version(env!("CARGO_PKG_VERSION").into());
 
@@ -581,6 +599,77 @@ fn latest_release_version() -> Option<String> {
     parse_version(&v).map(|_| v)
 }
 
+/// 새 버전이 있고 그 버전을 아직 알리지 않았으면 Windows 알림을 띄운다. 같은 버전은 한 번만 알린다.
+fn notify_if_update_available() {
+    let Some(latest) = latest_release_version() else { return };
+    if !is_newer(&latest, env!("CARGO_PKG_VERSION")) {
+        return;
+    }
+    let state_dir = std::env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir)
+        .join("Tailscale Force Connect");
+    let marker = state_dir.join("notified-version.txt");
+    if std::fs::read_to_string(&marker).map(|s| s.trim() == latest).unwrap_or(false) {
+        return;
+    }
+    if show_toast(
+        &format!("새 버전 v{latest}"),
+        "Tailscale Force Connect를 업데이트할 수 있습니다. 누르면 관리 창이 열리고 바로 업데이트할 수 있습니다.",
+    ) {
+        let _ = std::fs::create_dir_all(&state_dir);
+        let _ = std::fs::write(&marker, &latest);
+    }
+}
+
+fn xml_escape(s: &str) -> String {
+    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
+}
+
+/// Windows 알림(토스트)을 띄운다. 누르면 tailscale-force-connect: 링크로 관리 창이 열린다.
+/// WinRT 바인딩을 넣지 않으려고 Windows PowerShell의 WinRT 지원을 쓴다. 띄웠으면 true.
+fn show_toast(title: &str, body: &str) -> bool {
+    let xml = format!(
+        "<toast activationType=\"protocol\" launch=\"tailscale-force-connect:update\">\
+<visual><binding template=\"ToastGeneric\"><text>{}</text><text>{}</text></binding></visual>\
+<actions><action content=\"관리 창 열기\" activationType=\"protocol\" arguments=\"tailscale-force-connect:update\"/></actions></toast>",
+        xml_escape(title),
+        xml_escape(body)
+    );
+    let script = format!(
+        "$ErrorActionPreference = 'Stop'\n\
+[void][Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime]\n\
+[void][Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime]\n\
+$xml = New-Object Windows.Data.Xml.Dom.XmlDocument\n\
+$xml.LoadXml(@'\n{xml}\n'@)\n\
+$toast = New-Object Windows.UI.Notifications.ToastNotification $xml\n\
+[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('{APP_ID}').Show($toast)\n"
+    );
+    Command::new("powershell.exe")
+        .args(["-NoProfile", "-NonInteractive", "-EncodedCommand", &encode_ps_command(&script)])
+        .env_remove("PSModulePath")
+        .creation_flags(CREATE_NO_WINDOW)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// PowerShell -EncodedCommand 형식: UTF-16LE를 Base64로. 따옴표·한글이 명령줄에서 깨지지 않게 한다.
+fn encode_ps_command(script: &str) -> String {
+    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let bytes: Vec<u8> = script.encode_utf16().flat_map(|u| u.to_le_bytes()).collect();
+    let mut out = String::with_capacity((bytes.len() + 2) / 3 * 4);
+    for chunk in bytes.chunks(3) {
+        let b = [chunk[0], *chunk.get(1).unwrap_or(&0), *chunk.get(2).unwrap_or(&0)];
+        let n = (b[0] as u32) << 16 | (b[1] as u32) << 8 | b[2] as u32;
+        out.push(T[(n >> 18) as usize & 63] as char);
+        out.push(T[(n >> 12) as usize & 63] as char);
+        out.push(if chunk.len() > 1 { T[(n >> 6) as usize & 63] as char } else { '=' });
+        out.push(if chunk.len() > 2 { T[n as usize & 63] as char } else { '=' });
+    }
+    out
+}
+
 fn parse_version(v: &str) -> Option<(u32, u32, u32)> {
     let mut parts = v.trim().trim_start_matches('v').split('.').map(|p| p.parse::<u32>().ok());
     let major = parts.next()??;
@@ -613,6 +702,15 @@ mod tests {
         assert!(!is_newer("1.4.0-beta", "1.3.0"));
         assert!(!is_newer("garbage", "1.3.0"));
         assert!(!is_newer("1.4", "1.3.0"));
+    }
+
+    #[test]
+    fn encoded_command() {
+        // [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes('ab'))
+        assert_eq!(encode_ps_command("ab"), "YQBiAA==");
+        // [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes('한')) == 'XNU=' (U+D55C → 5C D5)
+        assert_eq!(encode_ps_command("한"), "XNU=");
+        assert_eq!(xml_escape("<a&\"b\">"), "&lt;a&amp;&quot;b&quot;&gt;");
     }
 
     #[test]

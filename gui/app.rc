@@ -3,8 +3,8 @@
 1 24 "app.manifest"
 
 1 VERSIONINFO
-FILEVERSION 1,4,0,0
-PRODUCTVERSION 1,4,0,0
+FILEVERSION 1,5,0,0
+PRODUCTVERSION 1,5,0,0
 BEGIN
   BLOCK "StringFileInfo"
   BEGIN
@@ -12,12 +12,12 @@ BEGIN
     BEGIN
       VALUE "CompanyName", "tailscale-force-connect"
       VALUE "FileDescription", "Tailscale Force Connect"
-      VALUE "FileVersion", "1.4.0"
+      VALUE "FileVersion", "1.5.0"
       VALUE "InternalName", "TailscaleForceConnect"
       VALUE "LegalCopyright", "MIT License"
       VALUE "OriginalFilename", "TailscaleForceConnect.exe"
       VALUE "ProductName", "Tailscale Force Connect"
-      VALUE "ProductVersion", "1.4.0"
+      VALUE "ProductVersion", "1.5.0"
     END
   END
   BLOCK "VarFileInfo"
