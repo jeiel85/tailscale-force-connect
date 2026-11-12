@@ -30,13 +30,26 @@ if (-not $isAdmin) {
 $lines = New-Object System.Collections.Generic.List[string]
 function Write-Report($m) { Write-Host $m; $lines.Add([string]$m) }
 
+# 네트워크가 잠깐 끊기는 경우가 있어(실제로 겪음) 30초 제한으로 최대 3번 시도한다.
+function Invoke-WithRetry([scriptblock]$Action, [string]$What) {
+    for ($i = 1; $i -le 3; $i++) {
+        try { return & $Action } catch {
+            if ($i -eq 3) { throw "$What 실패(3번 시도): $($_.Exception.Message)" }
+            Write-Report "$What 실패, 5초 뒤 다시 시도 ($i/3): $($_.Exception.Message)"
+            Start-Sleep -Seconds 5
+        }
+    }
+}
+
 $exitCode = 0
 $stage = $null
 try {
     try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12 } catch { }
 
     # 1) 최신 릴리스 정보
-    $rel = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/releases/latest" -Headers @{ 'User-Agent' = 'tailscale-force-connect-updater'; 'Accept' = 'application/vnd.github+json' } -UseBasicParsing
+    $rel = Invoke-WithRetry -What '최신 릴리스 조회' -Action {
+        Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/releases/latest" -Headers @{ 'User-Agent' = 'tailscale-force-connect-updater'; 'Accept' = 'application/vnd.github+json' } -UseBasicParsing -TimeoutSec 30
+    }
     $zipAsset = $rel.assets | Where-Object { $_.name -eq $asset } | Select-Object -First 1
     if (-not $zipAsset) { throw "최신 릴리스($($rel.tag_name))에 $asset 이(가) 없습니다." }
     Write-Report "최신 릴리스: $($rel.tag_name)"
@@ -48,7 +61,9 @@ try {
     $zip = Join-Path $stage $asset
     $oldProgress = $ProgressPreference
     $ProgressPreference = 'SilentlyContinue'
-    try { Invoke-WebRequest -Uri $zipAsset.browser_download_url -OutFile $zip -UseBasicParsing } finally { $ProgressPreference = $oldProgress }
+    try {
+        Invoke-WithRetry -What '내려받기' -Action { Invoke-WebRequest -Uri $zipAsset.browser_download_url -OutFile $zip -UseBasicParsing -TimeoutSec 120 } | Out-Null
+    } finally { $ProgressPreference = $oldProgress }
 
     # 3) GitHub이 기록한 SHA-256과 비교
     $actual = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLower()
