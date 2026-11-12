@@ -9,7 +9,7 @@ use std::{
     process::Command,
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicI64, Ordering},
     },
     time::{Duration, SystemTime},
 };
@@ -24,6 +24,21 @@ const LOG_LINES: usize = 9;
 
 /// 콤보 상자 항목 순서와 같다: (install.ps1 -ReconnectAfter 값, 분)
 const RECONNECT: [(&str, i64); 5] = [("0", 0), ("30m", 30), ("1h", 60), ("2h", 120), ("4h", 240)];
+const RECONNECT_LABELS: [&str; 5] = ["끄기", "30분", "1시간", "2시간", "4시간"];
+
+/// 화면 갱신 사이에 유지하는 값
+struct UiState {
+    /// 콤보 상자를 현재 설정으로 한 번 맞췄는지
+    index_initialized: AtomicBool,
+    /// 설치된 자동 재연결 시간(분). 모르면 -1
+    installed_minutes: AtomicI64,
+    /// 콤보 상자 끝에 붙인 '현재 설정' 항목의 분. 없으면 -1
+    custom_option: AtomicI64,
+}
+
+fn reconnect_arg(minutes: i64) -> String {
+    if minutes <= 0 { "0".into() } else { format!("{minutes}m") }
+}
 
 struct Snapshot {
     installed: bool,
@@ -41,23 +56,27 @@ fn main() -> Result<(), slint::PlatformError> {
     ui.set_version(env!("CARGO_PKG_VERSION").into());
 
     let refreshing = Arc::new(AtomicBool::new(false));
-    let index_initialized = Arc::new(AtomicBool::new(false));
+    let state = Arc::new(UiState {
+        index_initialized: AtomicBool::new(false),
+        installed_minutes: AtomicI64::new(-1),
+        custom_option: AtomicI64::new(-1),
+    });
 
     let refresh = {
         let weak = ui.as_weak();
         let refreshing = refreshing.clone();
-        let index_initialized = index_initialized.clone();
+        let state = state.clone();
         move || {
             if refreshing.swap(true, Ordering::SeqCst) {
                 return; // 이전 조회가 아직 끝나지 않았다
             }
             let weak = weak.clone();
             let refreshing = refreshing.clone();
-            let index_initialized = index_initialized.clone();
+            let state = state.clone();
             std::thread::spawn(move || {
                 let snap = collect_snapshot();
                 let _ = weak.upgrade_in_event_loop(move |ui| {
-                    apply_snapshot(&ui, &snap, &index_initialized);
+                    apply_snapshot(&ui, &snap, &state);
                 });
                 refreshing.store(false, Ordering::SeqCst);
             });
@@ -73,17 +92,30 @@ fn main() -> Result<(), slint::PlatformError> {
     }
 
     // 설치 / 적용 / 동작 확인은 모두 install.ps1을 다른 인자로 실행한다.
+    // keep_installed: 동작 확인처럼 설정을 바꾸면 안 되는 경우. 콤보 상자 값 대신 설치된 값을 넘긴다.
     let run_install = {
         let weak = ui.as_weak();
         let refresh = refresh.clone();
-        Arc::new(move |test: bool, busy_text: &str, title_ok: &str| {
+        let state = state.clone();
+        Arc::new(move |test: bool, keep_installed: bool, busy_text: &str, title_ok: &str| {
             let Some(ui) = weak.upgrade() else { return };
             let Some(script) = sibling("install.ps1") else {
                 show_result(&ui, false, "설치 스크립트를 찾지 못했습니다", "install.ps1이 이 실행 파일과 같은 폴더에 있어야 합니다. 받은 zip을 모두 푼 뒤 실행하세요.");
                 return;
             };
-            let idx = (ui.get_reconnect_index().max(0) as usize).min(RECONNECT.len() - 1);
-            let mut args = format!("-ReconnectAfter {}", RECONNECT[idx].0);
+            let installed = state.installed_minutes.load(Ordering::SeqCst);
+            let custom = state.custom_option.load(Ordering::SeqCst);
+            let idx = ui.get_reconnect_index().max(0) as usize;
+            let value = if keep_installed && installed >= 0 {
+                reconnect_arg(installed)
+            } else if idx < RECONNECT.len() {
+                RECONNECT[idx].0.to_string()
+            } else if custom >= 0 {
+                reconnect_arg(custom) // 콤보 상자 끝의 '현재 설정' 항목
+            } else {
+                RECONNECT[2].0.to_string()
+            };
+            let mut args = format!("-ReconnectAfter {value}");
             if !test {
                 args.push_str(" -NoTest");
             }
@@ -127,16 +159,16 @@ fn main() -> Result<(), slint::PlatformError> {
         ui.on_install(move || {
             let test = weak.upgrade().map(|ui| ui.get_run_test()).unwrap_or(false);
             let text = if test { "설치하고 동작을 확인하는 중입니다. 연결이 몇 초 끊깁니다." } else { "설치하는 중입니다." };
-            run(test, text, "설치했습니다");
+            run(test, false, text, "설치했습니다");
         });
     }
     {
         let run = run_install.clone();
-        ui.on_apply_reconnect(move || run(false, "자동 재연결 설정을 바꾸는 중입니다.", "설정을 바꿨습니다"));
+        ui.on_apply_reconnect(move || run(false, false, "자동 재연결 설정을 바꾸는 중입니다.", "설정을 바꿨습니다"));
     }
     {
         let run = run_install.clone();
-        ui.on_verify(move || run(true, "연결을 몇 초 끊었다가 다시 연결되는지 확인하는 중입니다.", "동작을 확인했습니다"));
+        ui.on_verify(move || run(true, true, "연결을 몇 초 끊었다가 다시 연결되는지 확인하는 중입니다. 설정은 바꾸지 않습니다.", "동작을 확인했습니다"));
     }
 
     {
@@ -220,7 +252,7 @@ fn summarize(text: &str) -> String {
     out.join("\n")
 }
 
-fn apply_snapshot(ui: &AppWindow, s: &Snapshot, index_initialized: &AtomicBool) {
+fn apply_snapshot(ui: &AppWindow, s: &Snapshot, state: &UiState) {
     ui.set_installed(s.installed);
     ui.set_state(s.state.into());
     ui.set_state_title(s.title.clone().into());
@@ -239,11 +271,24 @@ fn apply_snapshot(ui: &AppWindow, s: &Snapshot, index_initialized: &AtomicBool) 
     ui.set_reconnect_text(reconnect_text.into());
     ui.set_reconnect_on(reconnect_on);
 
-    // 콤보 상자는 처음 한 번만 현재 설정으로 맞춘다(사용자가 고르는 중인 값을 덮어쓰지 않도록).
-    if s.installed && s.settings_found && !index_initialized.swap(true, Ordering::SeqCst) {
-        if let Some(i) = RECONNECT.iter().position(|(_, m)| *m == s.reconnect_minutes) {
-            ui.set_reconnect_index(i as i32);
+    let known = s.installed && s.settings_found;
+    state.installed_minutes.store(if known { s.reconnect_minutes } else { -1 }, Ordering::SeqCst);
+
+    // 프리셋에 없는 값(예: 한 줄 설치로 넣은 1h30m)은 콤보 상자 끝에 '현재 설정' 항목으로 보여 준다.
+    let preset = RECONNECT.iter().position(|(_, m)| *m == s.reconnect_minutes);
+    let custom = if known && preset.is_none() { s.reconnect_minutes } else { -1 };
+    if state.custom_option.swap(custom, Ordering::SeqCst) != custom {
+        let mut labels: Vec<SharedString> = RECONNECT_LABELS.iter().map(|l| SharedString::from(*l)).collect();
+        if custom >= 0 {
+            labels.push(format!("{} (현재 설정)", minutes_label(custom)).into());
         }
+        ui.set_reconnect_options(ModelRc::new(VecModel::from(labels)));
+    }
+
+    // 콤보 상자는 처음 한 번만 현재 설정으로 맞춘다(사용자가 고르는 중인 값을 덮어쓰지 않도록).
+    if known && !state.index_initialized.swap(true, Ordering::SeqCst) {
+        let i = preset.unwrap_or(RECONNECT.len());
+        ui.set_reconnect_index(i as i32);
     }
 
     let lines: Vec<SharedString> = s.log.iter().map(|l| SharedString::from(l.as_str())).collect();
