@@ -199,6 +199,48 @@ fn main() -> Result<(), slint::PlatformError> {
         });
     }
 
+    // 새 버전 확인: 설치된 관리 창(Program Files)에서만, 열 때 한 번. 실패하면 조용히 넘어간다.
+    if (running_from_program_files() || cfg!(debug_assertions)) && sibling("update.ps1").is_some() {
+        let weak = ui.as_weak();
+        std::thread::spawn(move || {
+            if let Some(latest) = latest_release_version() {
+                if is_newer(&latest, env!("CARGO_PKG_VERSION")) {
+                    let _ = weak.upgrade_in_event_loop(move |ui| {
+                        ui.set_update_version(latest.into());
+                        ui.set_update_available(true);
+                    });
+                }
+            }
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        ui.on_update(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            let Some(script) = sibling("update.ps1") else {
+                show_result(&ui, false, "업데이트 스크립트를 찾지 못했습니다", "update.ps1이 이 실행 파일과 같은 폴더에 있어야 합니다. 한 줄 설치로 다시 설치하세요.");
+                return;
+            };
+            ui.set_result_visible(false);
+            ui.set_busy(true);
+            ui.set_busy_text("관리자 권한 창에서 [예]를 누르세요. 업데이트가 시작되면 이 창은 닫히고, 끝나면 새 버전으로 다시 열립니다.".into());
+            let weak = weak.clone();
+            std::thread::spawn(move || {
+                // 업데이트가 이 실행 파일을 바꿔야 하므로 기다리지 않고 창을 닫는다. 실패하면 스크립트가 메시지 상자로 알린다.
+                let outcome = run_elevated(&script, "-Relaunch", false, || {});
+                let _ = weak.upgrade_in_event_loop(move |ui| match outcome {
+                    Ok(_) => {
+                        let _ = slint::quit_event_loop();
+                    }
+                    Err(msg) => {
+                        ui.set_busy(false);
+                        show_result(&ui, false, "업데이트하지 않았습니다", &msg);
+                    }
+                });
+            });
+        });
+    }
+
     ui.on_open_logs(|| {
         let target = if Path::new(DATA_DIR).exists() { PathBuf::from(DATA_DIR) } else { exe_dir() };
         let _ = Command::new("explorer.exe").arg(target).spawn();
@@ -484,6 +526,80 @@ fn running_from_program_files() -> bool {
     let pf = std::env::var("ProgramFiles").unwrap_or_else(|_| r"C:\Program Files".into());
     let app = PathBuf::from(pf).join("Tailscale Force Connect");
     exe_dir().to_string_lossy().eq_ignore_ascii_case(&app.to_string_lossy())
+}
+
+/// GitHub 최신 릴리스의 버전("v1.4.0" → "1.4.0"). Windows PowerShell로 조회한다(별도 HTTP 라이브러리를 넣지 않으려고).
+fn latest_release_version() -> Option<String> {
+    #[cfg(debug_assertions)]
+    if let Ok(fake) = std::env::var("TFC_FAKE_LATEST") {
+        return Some(fake); // 개발용: 업데이트 알림 화면 확인
+    }
+    let script = "try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor 3072 } catch { };         (Invoke-RestMethod -UseBasicParsing -TimeoutSec 15 -Uri 'https://api.github.com/repos/jeiel85/tailscale-force-connect/releases/latest'         -Headers @{ 'User-Agent' = 'tailscale-force-connect-updater'; 'Accept' = 'application/vnd.github+json' }).tag_name";
+    let out = Command::new("powershell.exe")
+        .args(["-NoProfile", "-NonInteractive", "-Command", script])
+        // PowerShell 7에서 상속된 모듈 경로가 Windows PowerShell 5.1에 섞이지 않게 한다.
+        .env_remove("PSModulePath")
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .ok()?;
+    let tag = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let v = tag.trim_start_matches('v').to_string();
+    parse_version(&v).map(|_| v)
+}
+
+fn parse_version(v: &str) -> Option<(u32, u32, u32)> {
+    let mut parts = v.trim().trim_start_matches('v').split('.').map(|p| p.parse::<u32>().ok());
+    let major = parts.next()??;
+    let minor = parts.next()??;
+    let patch = parts.next()??;
+    if parts.next().is_some() {
+        return None;
+    }
+    Some((major, minor, patch))
+}
+
+fn is_newer(latest: &str, current: &str) -> bool {
+    match (parse_version(latest), parse_version(current)) {
+        (Some(l), Some(c)) => l > c,
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn version_compare() {
+        assert!(is_newer("1.4.0", "1.3.0"));
+        assert!(is_newer("v1.10.0", "1.9.9"));
+        assert!(is_newer("2.0.0", "1.99.99"));
+        assert!(!is_newer("1.3.0", "1.3.0"));
+        assert!(!is_newer("1.2.9", "1.3.0"));
+        assert!(!is_newer("1.4.0-beta", "1.3.0"));
+        assert!(!is_newer("garbage", "1.3.0"));
+        assert!(!is_newer("1.4", "1.3.0"));
+    }
+
+    #[test]
+    fn reconnect_args() {
+        assert_eq!(reconnect_arg(0), "0");
+        assert_eq!(reconnect_arg(-1), "0");
+        assert_eq!(reconnect_arg(90), "90m");
+    }
+
+    #[test]
+    fn summarize_drops_copied_log() {
+        let text = "설치 시작 2026
+Tailscale: x
+--- connect.log ---
+2026-11-11 00:00:00  a
+최종 상태: Running
+완료 (종료 코드 0)";
+        assert_eq!(summarize(text), "Tailscale: x
+최종 상태: Running
+완료 (종료 코드 0)");
+    }
 }
 
 fn wide(s: &str) -> Vec<u16> {

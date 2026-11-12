@@ -11,7 +11,7 @@ $taskName    = 'Tailscale Auto Connect'
 $eventSource = 'TailscaleForceConnect'
 $logFile     = Join-Path $dir 'install.log'
 $watchTask   = 'Tailscale Auto Reconnect'
-$version     = '1.3.0'
+$version     = '1.4.0'
 $appDir      = Join-Path $env:ProgramFiles 'Tailscale Force Connect'   # 관리 앱(GUI)과 스크립트 원본
 $appExe      = 'TailscaleForceConnect.exe'
 $shortcut    = Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu\Programs\Tailscale Force Connect.lnk'
@@ -160,7 +160,7 @@ try {
             Where-Object { $_.Path -and ($_.Path -ieq (Join-Path $appDir $appExe)) }
         if ($running) { $running | Stop-Process -Force; Start-Sleep -Seconds 1; Write-Report '열려 있던 관리 창을 닫음 (업데이트)' }
         New-Item -ItemType Directory -Force -Path $appDir | Out-Null
-        foreach ($f in $appExe, 'install.ps1', 'uninstall.ps1', 'connect.ps1') {
+        foreach ($f in $appExe, 'install.ps1', 'uninstall.ps1', 'connect.ps1', 'update.ps1') {
             Copy-Item -LiteralPath (Join-Path $PSScriptRoot $f) -Destination $appDir -Force
         }
         $wsh = New-Object -ComObject WScript.Shell
