@@ -199,19 +199,53 @@ fn main() -> Result<(), slint::PlatformError> {
         });
     }
 
-    // 새 버전 확인: 설치된 관리 창(Program Files)에서만, 열 때 한 번. 실패하면 조용히 넘어간다.
-    if (running_from_program_files() || cfg!(debug_assertions)) && sibling("update.ps1").is_some() {
+    // 새 버전 확인. 설치된 관리 창(Program Files)은 열 때 자동으로 확인하고(실패하면 조용히 넘어감),
+    // 머리글의 버전 표시를 누르면 어디서든 수동으로 확인한다. 새 버전이 있으면 알림 창을 띄운다.
+    let checking = Arc::new(AtomicBool::new(false));
+    let check_update = {
         let weak = ui.as_weak();
-        std::thread::spawn(move || {
-            if let Some(latest) = latest_release_version() {
-                if is_newer(&latest, env!("CARGO_PKG_VERSION")) {
-                    let _ = weak.upgrade_in_event_loop(move |ui| {
-                        ui.set_update_version(latest.into());
-                        ui.set_update_available(true);
-                    });
+        let checking = checking.clone();
+        Arc::new(move |manual: bool| {
+            if checking.swap(true, Ordering::SeqCst) {
+                return; // 이미 확인하는 중
+            }
+            if manual {
+                if let Some(ui) = weak.upgrade() {
+                    ui.set_update_status("확인하는 중…".into());
                 }
             }
-        });
+            let weak = weak.clone();
+            let checking = checking.clone();
+            std::thread::spawn(move || {
+                let latest = latest_release_version();
+                checking.store(false, Ordering::SeqCst);
+                let _ = weak.upgrade_in_event_loop(move |ui| match latest {
+                    Some(v) if is_newer(&v, env!("CARGO_PKG_VERSION")) => {
+                        ui.set_update_status(format!("새 버전 v{v}").into());
+                        ui.set_update_version(v.into());
+                        ui.set_update_available(true);
+                        ui.set_show_update_prompt(true);
+                    }
+                    Some(_) => {
+                        if manual {
+                            ui.set_update_status("최신 버전입니다".into());
+                        }
+                    }
+                    None => {
+                        if manual {
+                            ui.set_update_status("확인하지 못했습니다. 인터넷 연결을 확인하세요.".into());
+                        }
+                    }
+                });
+            });
+        })
+    };
+    if (running_from_program_files() || cfg!(debug_assertions)) && sibling("update.ps1").is_some() {
+        check_update(false);
+    }
+    {
+        let check = check_update.clone();
+        ui.on_check_update(move || check(true));
     }
     {
         let weak = ui.as_weak();

@@ -130,7 +130,13 @@ component PrimaryButton inherits Rectangle {
 component LinkText inherits Rectangle {
     in property <string> text;
     in property <length> font-size: 12px;
+    out property <bool> hovered: touch.has-hover;
     callback clicked();
+    accessible-role: button;
+    accessible-label: root.text;
+    accessible-action-default => {
+        root.clicked();
+    }
     min-width: label.preferred-width;
     min-height: label.preferred-height;
     label := Text {
@@ -180,6 +186,8 @@ export component AppWindow inherits Window {
     in-out property <bool> confirm-uninstall;
     in property <bool> update-available;
     in property <string> update-version;
+    in-out property <string> update-status;
+    in-out property <bool> show-update-prompt;
 
     callback install();
     callback apply-reconnect();
@@ -189,11 +197,20 @@ export component AppWindow inherits Window {
     callback open-url(string);
     callback dismiss-result();
     callback update();
+    callback check-update();
 
     property <color> state-color: root.state == "running" ? Theme.green
         : root.state == "stopped" ? Theme.amber
         : (root.state == "login" || root.state == "missing") ? Theme.red
         : Theme.grey;
+
+    Timer {
+        interval: 6s;
+        running: root.update-status != "" && root.update-status != "확인하는 중…";
+        triggered => {
+            root.update-status = "";
+        }
+    }
 
     // 제거 버튼은 두 번 눌러야 한다. 4초 안에 다시 누르지 않으면 원래대로 돌아간다.
     Timer {
@@ -231,9 +248,18 @@ export component AppWindow inherits Window {
             VerticalLayout {
                 alignment: center;
                 Text {
-                    text: "v" + root.version;
+                    text: root.update-status != "" ? root.update-status : version-link.hovered ? "눌러서 새 버전 확인" : "";
                     color: Theme.muted;
                     font-size: 12px;
+                }
+            }
+            VerticalLayout {
+                alignment: center;
+                version-link := LinkText {
+                    text: "v" + root.version;
+                    clicked => {
+                        root.check-update();
+                    }
                 }
             }
         }
@@ -558,6 +584,66 @@ export component AppWindow inherits Window {
                     text: "Made with Slint";
                     clicked => {
                         root.open-url("https://slint.dev");
+                    }
+                }
+            }
+        }
+    }
+
+    // 새 버전을 찾으면 띄우는 알림 창. [나중에]를 누르면 위쪽 초록 알림만 남는다.
+    if root.show-update-prompt && !root.busy: Rectangle {
+        width: 100%;
+        height: 100%;
+        background: Theme.dark ? #000000a0 : #14202B80;
+        TouchArea { }
+        Rectangle {
+            width: min(parent.width - 60px, 380px);
+            height: prompt-layout.preferred-height;
+            border-radius: 14px;
+            background: Theme.card;
+            drop-shadow-blur: 24px;
+            drop-shadow-color: #00000060;
+            prompt-layout := VerticalLayout {
+                padding: 22px;
+                spacing: 12px;
+                HorizontalLayout {
+                    spacing: 10px;
+                    Image {
+                        source: @image-url("../assets/icon.png");
+                        width: 24px;
+                        height: 24px;
+                    }
+                    VerticalLayout {
+                        alignment: center;
+                        Text {
+                            text: "새 버전 v" + root.update-version;
+                            font-size: 16px;
+                            font-weight: 700;
+                            color: Theme.ink;
+                        }
+                    }
+                }
+                Text {
+                    text: "지금 업데이트할까요? 설정은 그대로 두고 연결을 끊지 않습니다. 관리 창이 닫혔다가 새 버전으로 다시 열립니다.";
+                    color: Theme.muted;
+                    font-size: 13px;
+                    wrap: word-wrap;
+                }
+                HorizontalLayout {
+                    spacing: 10px;
+                    alignment: end;
+                    Button {
+                        text: "나중에";
+                        clicked => {
+                            root.show-update-prompt = false;
+                        }
+                    }
+                    PrimaryButton {
+                        text: "지금 업데이트";
+                        clicked => {
+                            root.show-update-prompt = false;
+                            root.update();
+                        }
                     }
                 }
             }
