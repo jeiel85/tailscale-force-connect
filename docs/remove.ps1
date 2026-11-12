@@ -57,7 +57,10 @@ function Invoke-TailscaleForceConnectRemove {
             $oldProgress = $ProgressPreference
             $ProgressPreference = 'SilentlyContinue'
             try { Invoke-WebRequest -Uri $url -OutFile $zip -UseBasicParsing } finally { $ProgressPreference = $oldProgress }
-            Expand-Archive -Path $zip -DestinationPath $tmp
+            # Not Expand-Archive: when cmd is started from PowerShell 7, PSModulePath makes Windows PowerShell 5.1
+            # load PowerShell 7's Archive module, which calls a .NET Core-only overload and fails.
+            Add-Type -AssemblyName System.IO.Compression.FileSystem
+            [IO.Compression.ZipFile]::ExtractToDirectory($zip, $tmp)
             $uninstaller = Join-Path $tmp 'tailscale-force-connect\uninstall.ps1'
             if (-not (Test-Path $uninstaller)) { throw 'uninstall.ps1 was not found in the downloaded package.' }
         }
