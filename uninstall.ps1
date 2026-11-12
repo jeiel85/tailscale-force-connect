@@ -31,6 +31,7 @@ $appDir      = Join-Path $env:ProgramFiles 'Tailscale Force Connect'
 $appName     = 'TailscaleForceConnect'
 $shortcut    = Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu\Programs\Tailscale Force Connect.lnk'
 $notifyTask  = 'Tailscale Force Connect Update Check'
+$alertTask   = 'Tailscale Force Connect Status Alert'
 $protoKey    = 'HKLM:\SOFTWARE\Classes\tailscale-force-connect'
 $script:reportLines = New-Object System.Collections.Generic.List[string]
 
@@ -59,6 +60,10 @@ try {
         Write-Report "예약 작업 삭제: $taskName"
     } else {
         Write-Report "예약 작업 없음: $taskName"
+    }
+    if (Get-ScheduledTask -TaskName $alertTask -ErrorAction SilentlyContinue) {
+        Unregister-ScheduledTask -TaskName $alertTask -Confirm:$false
+        Write-Report "예약 작업 삭제: $alertTask"
     }
     if (Get-ScheduledTask -TaskName $notifyTask -ErrorAction SilentlyContinue) {
         Unregister-ScheduledTask -TaskName $notifyTask -Confirm:$false

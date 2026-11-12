@@ -62,6 +62,10 @@ fn main() -> Result<(), slint::PlatformError> {
         notify_if_update_available();
         return Ok(());
     }
+    if args.iter().any(|a| a == "--watch-notify") {
+        watch_and_notify();
+        return Ok(());
+    }
     if args.iter().any(|a| a == "--notify-test") {
         show_toast(
             "Tailscale Force Connect 알림 시험",
@@ -599,16 +603,81 @@ fn latest_release_version() -> Option<String> {
     parse_version(&v).map(|_| v)
 }
 
+/// 사용자별 알림 기록을 두는 폴더 (%LOCALAPPDATA%\Tailscale Force Connect)
+fn user_state_dir() -> PathBuf {
+    std::env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir)
+        .join("Tailscale Force Connect")
+}
+
+/// settings.json에 기록된 자동 재연결 시간(분). 설치되지 않았거나 기록이 없으면 None.
+fn installed_reconnect_minutes() -> Option<i64> {
+    let text = std::fs::read_to_string(Path::new(DATA_DIR).join("settings.json")).ok()?;
+    let v: serde_json::Value = serde_json::from_str(text.trim_start_matches('\u{feff}')).ok()?;
+    v.get("reconnectMinutes")?.as_i64()
+}
+
+fn current_backend_state() -> Option<String> {
+    #[cfg(debug_assertions)]
+    if let Ok(fake) = std::env::var("TFC_FAKE_STATE") {
+        return Some(fake); // 개발용: 끊김 알림 확인
+    }
+    let v = tailscale_status(&find_tailscale()?)?;
+    v.get("BackendState")?.as_str().map(str::to_string)
+}
+
+/// 예약 작업 'Tailscale Force Connect Status Alert'가 1분마다 --watch-notify로 실행한다.
+/// 끊긴 것을 처음 보면 "끊겼습니다, 약 N분 뒤 다시 연결" 알림을 한 번 띄우고,
+/// 그 뒤 다시 연결되면 "다시 연결됐습니다" 알림으로 마무리한다. 연결돼 있는 동안은 아무것도 하지 않는다.
+fn watch_and_notify() {
+    let Some(state) = current_backend_state() else { return };
+    let marker = user_state_dir().join("disconnect-notified.txt");
+    let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    match state.as_str() {
+        "Stopped" => {
+            if marker.exists() {
+                return; // 이번 끊김은 이미 알렸다
+            }
+            let body = match installed_reconnect_minutes() {
+                Some(m) if m > 0 => {
+                    let elapsed = stopped_for_minutes().unwrap_or(0).max(0);
+                    let remaining = (m - elapsed).max(1);
+                    format!(
+                        "약 {} 뒤 자동으로 다시 연결합니다. 1분마다 상태를 확인하고 있습니다. 누르면 관리 창이 열립니다.",
+                        minutes_label(remaining)
+                    )
+                }
+                _ => "자동 재연결이 꺼져 있어 다음 부팅 때 다시 연결합니다. 지금 연결하려면 Tailscale에서 Connect를 누르세요.".to_string(),
+            };
+            if show_toast("Tailscale 연결이 끊겼습니다", &body) {
+                let _ = std::fs::create_dir_all(user_state_dir());
+                let _ = std::fs::write(&marker, now.to_string());
+            }
+        }
+        "Running" => {
+            let Ok(text) = std::fs::read_to_string(&marker) else { return };
+            let _ = std::fs::remove_file(&marker);
+            let since = text.trim().parse::<u64>().unwrap_or(now);
+            let mins = now.saturating_sub(since) / 60;
+            let body = if mins == 0 {
+                "연결이 돌아왔습니다.".to_string()
+            } else {
+                format!("끊긴 것을 알린 지 {} 만에 연결이 돌아왔습니다.", minutes_label(mins as i64))
+            };
+            show_toast("Tailscale에 다시 연결됐습니다", &body);
+        }
+        _ => {} // 로그인 필요 등은 관리 창에서 보여 준다
+    }
+}
+
 /// 새 버전이 있고 그 버전을 아직 알리지 않았으면 Windows 알림을 띄운다. 같은 버전은 한 번만 알린다.
 fn notify_if_update_available() {
     let Some(latest) = latest_release_version() else { return };
     if !is_newer(&latest, env!("CARGO_PKG_VERSION")) {
         return;
     }
-    let state_dir = std::env::var_os("LOCALAPPDATA")
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir)
-        .join("Tailscale Force Connect");
+    let state_dir = user_state_dir();
     let marker = state_dir.join("notified-version.txt");
     if std::fs::read_to_string(&marker).map(|s| s.trim() == latest).unwrap_or(false) {
         return;

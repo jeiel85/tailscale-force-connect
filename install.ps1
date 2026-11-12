@@ -18,6 +18,7 @@ $shortcut    = Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu\Programs
 $appId       = 'TailscaleForceConnect.Manager'          # Windows 알림의 앱 ID (시작 메뉴 바로가기에 기록)
 $protocol    = 'tailscale-force-connect'                # 알림을 누르면 관리 창을 여는 링크
 $notifyTask  = 'Tailscale Force Connect Update Check'   # 로그인할 때·매일 새 버전을 확인해 알림 (사용자 권한)
+$alertTask   = 'Tailscale Force Connect Status Alert'   # 1분마다 연결 상태를 보고 끊김·재연결을 알림 (사용자 권한)
 
 # 직접 끊은 뒤 다시 연결할 때까지의 시간. 30m, 1h, 1h30m처럼 h·m 단위로 받는다. 0이면 감시 작업을 만들지 않는다.
 $ReconnectAfter = $ReconnectAfter.Trim().ToLower()
@@ -250,6 +251,14 @@ try {
         $nSettings  = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Minutes 5) -MultipleInstances IgnoreNew
         Register-ScheduledTask -TaskName $notifyTask -Action $nAction -Trigger @($nLogon, $nDaily) -Principal $nPrincipal -Settings $nSettings -Description '새 버전이 있으면 Windows 알림으로 알린다. 업데이트는 알림을 눌러 관리 창에서 한다.' -Force | Out-Null
         Write-Report "새 버전 알림: 로그인할 때와 매일 12:30에 확인 (예약 작업 $notifyTask)"
+
+        # 연결 끊김·재연결 알림: 로그인한 사용자 권한으로 1분마다 상태만 확인한다(창 없음, 상주 프로세스 없음).
+        # 시간 기준 반복 트리거는 재부팅 뒤에도 이어지고, 로그인해 있는 동안에만 실행된다.
+        $aAction  = New-ScheduledTaskAction -Execute $installedExe -Argument '--watch-notify'
+        $aTrigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) -RepetitionInterval (New-TimeSpan -Minutes 1)
+        $aSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Minutes 1) -MultipleInstances IgnoreNew
+        Register-ScheduledTask -TaskName $alertTask -Action $aAction -Trigger $aTrigger -Principal $nPrincipal -Settings $aSettings -Description '1분마다 Tailscale 연결 상태를 확인해, 끊기거나 다시 연결되면 Windows 알림으로 알린다.' -Force | Out-Null
+        Write-Report "연결 알림: 1분마다 확인해 끊김·재연결을 알림 (예약 작업 $alertTask)"
     }
 
     # 1) 스크립트 복사 (새 파일은 폴더의 제한된 ACL을 물려받는다)

@@ -43,7 +43,26 @@ Tailscale Windows 클라이언트 **1.84 이상**에는 비슷한 목적의 [시
 - 부팅 시 자동 연결, 직접 끊은 뒤 자동 재연결 설정. 끊긴 상태라면 몇 분 뒤 다시 연결되는지도 보여 줍니다.
 - 최근 기록(`connect.log`)
 - 버튼: 재연결 시간 바꾸기, 동작 확인, 제거. 이 버튼을 누를 때만 UAC 창이 뜹니다.
-- 새 버전 알림: 창을 열 때 GitHub 최신 릴리스를 확인하고, 새 버전이 있으면 "지금 업데이트할까요?" 알림 창을 띄웁니다. [나중에]를 누르면 위쪽에 [업데이트] 버튼이 있는 알림만 남습니다. 머리글의 버전 표시(`v1.4.0`)를 누르면 언제든 직접 확인할 수 있습니다(아래 "업데이트" 참고).
+- 새 버전 알림: 창을 열 때 GitHub 최신 릴리스를 확인하고, 새 버전이 있으면 "지금 업데이트할까요?" 알림 창을 띄웁니다. [나중에]를 누르면 위쪽에 [업데이트] 버튼이 있는 알림만 남습니다. 머리글의 버전 표시(예: `v1.5.0`)를 누르면 언제든 직접 확인할 수 있습니다(아래 "업데이트" 참고).
+
+## Windows 알림
+
+관리 창을 열지 않아도 Windows 알림으로 알려 줍니다. 상주 프로세스 없이, 로그인한 사용자 권한으로 도는 예약 작업이 짧게 실행됐다가 끝납니다.
+
+| 알림 | 언제 | 누르면 |
+|---|---|---|
+| **Tailscale 연결이 끊겼습니다** — 약 N분 뒤 자동으로 다시 연결합니다 | 1분마다 상태를 확인하다가 끊긴 것을 처음 봤을 때(한 번만) | 관리 창이 열림 |
+| **Tailscale에 다시 연결됐습니다** | 끊김 알림을 띄운 뒤 연결이 돌아왔을 때 | 관리 창이 열림 |
+| **새 버전 vX.Y.Z** | 로그인할 때(2분 뒤)와 매일 12:30에 확인해 새 버전이 있을 때(버전마다 한 번) | 관리 창이 열리고 업데이트 창이 뜸 |
+
+- 연결 상태는 **1분마다** 확인합니다. Tailscale이 끊김을 알려 주는 이벤트가 없어서, 상주 프로세스 없이 할 수 있는 가장 빠른 방법입니다.
+- 알림이 이 앱 이름과 아이콘으로 보이도록 시작 메뉴 바로가기에 앱 ID(`TailscaleForceConnect.Manager`)를 기록합니다. 알림을 누르면 `tailscale-force-connect:` 링크로 관리 창을 엽니다.
+- 알림이 보이지 않으면 Windows 설정 → 시스템 → 알림에서 **Tailscale Force Connect**가 켜져 있는지, 방해 금지 모드가 꺼져 있는지 확인하세요.
+  아래 명령으로 시험 알림을 띄울 수 있습니다.
+
+  ```powershell
+  & "C:\Program Files\Tailscale Force Connect\TailscaleForceConnect.exe" --notify-test
+  ```
 
 창을 여는 것만으로는 관리자 권한이 필요 없습니다. 상태는 일반 권한으로 읽을 수 있는 정보(`tailscale status`, `settings.json`, `connect.log`)만 씁니다.
 버튼은 `C:\Program Files\Tailscale Force Connect\`에 있는 스크립트를 관리자 권한으로 실행합니다. 이 폴더는 관리자만 쓸 수 있습니다.
@@ -125,6 +144,7 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1
 | `connect.ps1` | 부팅 때 실행되는 본체입니다. 서비스가 꺼져 있으면 켜고, 연결될 때까지 최대 10분 동안 10초 간격으로 `tailscale up`을 실행합니다. 결과는 로그 파일과 이벤트 로그에 남깁니다. |
 | `install.ps1` | `connect.ps1`을 `C:\ProgramData\TailscaleAutoConnect\`에 복사하고, Unattended 모드를 켜고, 이벤트 로그 원본과 예약 작업 2개(부팅 시 연결, 자동 재연결 감시)를 등록한 뒤 동작을 확인합니다. |
 | `uninstall.ps1` | 예약 작업 2개, 설치 폴더, 이벤트 로그 원본을 지우고 결과를 보여 줍니다. Tailscale 본체와 Unattended 설정은 건드리지 않습니다. |
+| `TailscaleForceConnect.exe --watch-notify` / `--notify-update` / `--notify-test` | 창 없이 끊김·재연결 알림 / 새 버전 알림 / 시험 알림을 띄웁니다(예약 작업이 실행). |
 | `update.ps1` | 최신 릴리스를 받아 SHA-256을 확인한 뒤, 설정을 유지하고 연결을 끊지 않은 채 설치합니다. 관리 창의 [업데이트] 버튼이 실행합니다. |
 | `install.cmd`, `uninstall.cmd` | 더블클릭용 실행 파일입니다. 같은 폴더의 `.ps1`을 실행합니다. |
 | `TailscaleForceConnect.exe` | 관리 창입니다(릴리스 zip에만 들어 있음). 소스는 `gui/`에 있습니다. |
@@ -135,6 +155,9 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1
 설치되는 것:
 
 - 예약 작업 **`Tailscale Auto Connect`**: 시작 시 20초 뒤에 SYSTEM 계정으로 실행되며, 실행 시간은 최대 15분입니다.
+- 예약 작업 **`Tailscale Force Connect Status Alert`**: 로그인한 사용자 권한으로 1분마다 `TailscaleForceConnect.exe --watch-notify`를 실행해 끊김·재연결 알림을 띄웁니다.
+- 예약 작업 **`Tailscale Force Connect Update Check`**: 로그인한 사용자 권한으로 로그인 2분 뒤와 매일 12:30에 `--notify-update`를 실행해 새 버전 알림을 띄웁니다.
+- 레지스트리 `HKLM\SOFTWARE\Classes\tailscale-force-connect`: 알림을 누르면 관리 창을 여는 링크입니다. 알림 표시 기록은 사용자별로 `%LOCALAPPDATA%\Tailscale Force Connect\`에 남습니다.
 - 예약 작업 **`Tailscale Auto Reconnect`**: SYSTEM 계정으로 5분마다 실행됩니다(`connect.ps1 -Watch`). 끊긴 상태(`Stopped`)를 처음 본 시각을
   설치 폴더의 `stopped-since.txt`에 적어 두고, 설정한 시간이 지나도 끊겨 있으면 `tailscale up`을 실행합니다. 연결돼 있으면 아무 기록도 남기지 않습니다.
   로그인이 필요한 상태처럼 `tailscale up`으로 풀 수 없는 상태는 건드리지 않습니다.
