@@ -170,7 +170,7 @@ export component AppWindow inherits Window {
     in property <[string]> log-lines;
     in property <[string]> reconnect-options: ["끄기", "30분", "1시간", "2시간", "4시간"];
     in-out property <int> reconnect-index: 2;
-    in-out property <bool> run-test: true;
+    in-out property <bool> run-test: false;
     in property <bool> busy;
     in property <string> busy-text;
     in property <bool> result-visible;
@@ -323,7 +323,7 @@ export component AppWindow inherits Window {
                     VerticalLayout {
                         alignment: center;
                         Text {
-                            text: "연결을 몇 초 끊었다가 다시 연결되는지 봅니다";
+                            text: "연결을 몇 초 끊었다가 다시 연결되는지 봅니다. 원격으로 접속 중이면 누르지 마세요.";
                             color: Theme.muted;
                             font-size: 12px;
                             wrap: word-wrap;
@@ -365,7 +365,7 @@ export component AppWindow inherits Window {
                     }
                 }
                 CheckBox {
-                    text: "설치 후 동작 확인 (연결이 몇 초 끊김)";
+                    text: "설치 후 동작 확인 (연결이 몇 초 끊김 · 원격 접속 중이면 끄세요)";
                     checked <=> root.run-test;
                     enabled: !root.busy;
                 }

@@ -125,7 +125,7 @@ fn main() -> Result<(), slint::PlatformError> {
         let run = run_install.clone();
         let weak = ui.as_weak();
         ui.on_install(move || {
-            let test = weak.upgrade().map(|ui| ui.get_run_test()).unwrap_or(true);
+            let test = weak.upgrade().map(|ui| ui.get_run_test()).unwrap_or(false);
             let text = if test { "설치하고 동작을 확인하는 중입니다. 연결이 몇 초 끊깁니다." } else { "설치하는 중입니다." };
             run(test, text, "설치했습니다");
         });
