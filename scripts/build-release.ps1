@@ -10,6 +10,15 @@ $dist  = Join-Path $root 'dist'
 $stage = Join-Path $dist 'stage'
 $zip   = Join-Path $dist 'tailscale-force-connect.zip'
 
+# 실행 파일은 작업 트리에서, 스크립트는 $Ref에서 꺼내므로 둘이 같은 커밋이어야 한다.
+# 체크아웃이 $Ref와 다르거나 커밋하지 않은 변경이 있으면 서로 다른 버전이 한 zip에 섞이므로 멈춘다.
+$refCommit  = (git -C $root rev-parse --verify "$Ref^{commit}").Trim()
+$headCommit = (git -C $root rev-parse HEAD).Trim()
+if ($LASTEXITCODE -ne 0 -or -not $refCommit) { throw "$Ref 을(를) 찾을 수 없습니다." }
+if ($refCommit -ne $headCommit) { throw "체크아웃($headCommit)이 $Ref($refCommit)와 다릅니다. 'git checkout $Ref' 뒤 다시 실행하세요." }
+$dirty = git -C $root status --porcelain --untracked-files=no
+if ($dirty) { throw "커밋하지 않은 변경이 있습니다:`n$($dirty -join "`n")" }
+
 Push-Location (Join-Path $root 'gui')
 try {
     cargo build --release
