@@ -11,10 +11,14 @@ $taskName    = 'Tailscale Auto Connect'
 $eventSource = 'TailscaleForceConnect'
 $logFile     = Join-Path $dir 'install.log'
 $watchTask   = 'Tailscale Auto Reconnect'
-$version     = '1.4.0'
+$version     = '1.5.0'
 $appDir      = Join-Path $env:ProgramFiles 'Tailscale Force Connect'   # 관리 앱(GUI)과 스크립트 원본
 $appExe      = 'TailscaleForceConnect.exe'
 $shortcut    = Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu\Programs\Tailscale Force Connect.lnk'
+$appId       = 'TailscaleForceConnect.Manager'          # Windows 알림의 앱 ID (시작 메뉴 바로가기에 기록)
+$protocol    = 'tailscale-force-connect'                # 알림을 누르면 관리 창을 여는 링크
+$notifyTask  = 'Tailscale Force Connect Update Check'   # 로그인할 때·매일 새 버전을 확인해 알림 (사용자 권한)
+$alertTask   = 'Tailscale Force Connect Status Alert'   # 1분마다 연결 상태를 보고 끊김·재연결을 알림 (사용자 권한)
 
 # 직접 끊은 뒤 다시 연결할 때까지의 시간. 30m, 1h, 1h30m처럼 h·m 단위로 받는다. 0이면 감시 작업을 만들지 않는다.
 $ReconnectAfter = $ReconnectAfter.Trim().ToLower()
@@ -128,6 +132,47 @@ function Initialize-InstallDir {
     }
 }
 
+# 시작 메뉴 바로가기에 System.AppUserModel.ID를 기록한다. 데스크톱 앱이 Windows 알림을 띄우려면 필요하다.
+function Set-ShortcutAppId([string]$Path, [string]$AppId) {
+    if (-not ('TfcShortcutAppId' -as [type])) {
+        Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+[ComImport, Guid("886D8EEB-8CF2-4446-8D02-CDBA1DBDCF99"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+interface ITfcPropertyStore {
+    [PreserveSig] int GetCount(out uint count);
+    [PreserveSig] int GetAt(uint index, out TfcPropertyKey key);
+    [PreserveSig] int GetValue(ref TfcPropertyKey key, IntPtr value);
+    [PreserveSig] int SetValue(ref TfcPropertyKey key, ref TfcPropVariant value);
+    [PreserveSig] int Commit();
+}
+[StructLayout(LayoutKind.Sequential, Pack = 4)]
+struct TfcPropertyKey { public Guid fmtid; public uint pid; }
+[StructLayout(LayoutKind.Explicit, Size = 24)]
+struct TfcPropVariant { [FieldOffset(0)] public ushort vt; [FieldOffset(8)] public IntPtr p; }
+public static class TfcShortcutAppId {
+    [DllImport("shell32.dll", CharSet = CharSet.Unicode, PreserveSig = false)]
+    static extern void SHGetPropertyStoreFromParsingName(string path, IntPtr bindCtx, int flags, ref Guid iid, [MarshalAs(UnmanagedType.Interface)] out ITfcPropertyStore store);
+    public static void Set(string path, string appId) {
+        Guid iid = typeof(ITfcPropertyStore).GUID;
+        ITfcPropertyStore store;
+        SHGetPropertyStoreFromParsingName(path, IntPtr.Zero, 2 /* GPS_READWRITE */, ref iid, out store);
+        TfcPropertyKey key = new TfcPropertyKey { fmtid = new Guid("9F4C2855-9F79-4B39-A8D0-E1D42DE1D5F3"), pid = 5 };
+        TfcPropVariant value = new TfcPropVariant { vt = 31 /* VT_LPWSTR */, p = Marshal.StringToCoTaskMemUni(appId) };
+        try {
+            Marshal.ThrowExceptionForHR(store.SetValue(ref key, ref value));
+            Marshal.ThrowExceptionForHR(store.Commit());
+        } finally {
+            Marshal.FreeCoTaskMem(value.p);
+            Marshal.ReleaseComObject(store);
+        }
+    }
+}
+'@
+    }
+    [TfcShortcutAppId]::Set($Path, $AppId)
+}
+
 $exitCode = 0
 $didDown  = $false
 $ts = Find-TailscaleExe
@@ -172,6 +217,48 @@ try {
         Write-Report "관리 앱 설치: $appDir (시작 메뉴: Tailscale Force Connect)"
     } else {
         Write-Report '관리 앱: 패키지에 없어 건너뜀 (스크립트만 설치)'
+    }
+
+    # 0-2) 새 버전 Windows 알림. 관리 앱이 설치된 경우에만 등록한다.
+    #      - 시작 메뉴 바로가기에 앱 ID를 넣어야 알림이 이 앱 이름·아이콘으로 표시된다.
+    #      - 알림을 누르면 tailscale-force-connect: 링크로 관리 창을 연다.
+    #      - 확인은 로그인한 사용자 권한으로 도는 작업이 한다(상주 프로세스 없음).
+    $installedExe = Join-Path $appDir $appExe
+    if (Test-Path -LiteralPath $installedExe) {
+        if (-not (Test-Path -LiteralPath $shortcut)) {
+            $wsh = New-Object -ComObject WScript.Shell
+            $lnk = $wsh.CreateShortcut($shortcut)
+            $lnk.TargetPath = $installedExe
+            $lnk.WorkingDirectory = $appDir
+            $lnk.Description = 'Tailscale 자동 연결 상태 보기·설정'
+            $lnk.Save()
+        }
+        Set-ShortcutAppId -Path $shortcut -AppId $appId
+
+        $protoKey = "HKLM:\SOFTWARE\Classes\$protocol"
+        New-Item -Path "$protoKey\shell\open\command" -Force | Out-Null   # 이 도구 전용 키라 새로 써도 된다
+        Set-Item -Path $protoKey -Value 'URL:Tailscale Force Connect'
+        New-ItemProperty -Path $protoKey -Name 'URL Protocol' -Value '' -PropertyType String -Force | Out-Null
+        New-Item -Path "$protoKey\DefaultIcon" -Force | Out-Null
+        Set-Item -Path "$protoKey\DefaultIcon" -Value "`"$installedExe`",0"
+        Set-Item -Path "$protoKey\shell\open\command" -Value "`"$installedExe`" `"%1`""
+
+        $nAction    = New-ScheduledTaskAction -Execute $installedExe -Argument '--notify-update'
+        $nLogon     = New-ScheduledTaskTrigger -AtLogOn
+        $nLogon.Delay = 'PT2M'
+        $nDaily     = New-ScheduledTaskTrigger -Daily -At '12:30'
+        $nPrincipal = New-ScheduledTaskPrincipal -GroupId 'S-1-5-32-545' -RunLevel Limited   # Users: 로그인한 사용자로 실행
+        $nSettings  = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Minutes 5) -MultipleInstances IgnoreNew
+        Register-ScheduledTask -TaskName $notifyTask -Action $nAction -Trigger @($nLogon, $nDaily) -Principal $nPrincipal -Settings $nSettings -Description '새 버전이 있으면 Windows 알림으로 알린다. 업데이트는 알림을 눌러 관리 창에서 한다.' -Force | Out-Null
+        Write-Report "새 버전 알림: 로그인할 때와 매일 12:30에 확인 (예약 작업 $notifyTask)"
+
+        # 연결 끊김·재연결 알림: 로그인한 사용자 권한으로 1분마다 상태만 확인한다(창 없음, 상주 프로세스 없음).
+        # 시간 기준 반복 트리거는 재부팅 뒤에도 이어지고, 로그인해 있는 동안에만 실행된다.
+        $aAction  = New-ScheduledTaskAction -Execute $installedExe -Argument '--watch-notify'
+        $aTrigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) -RepetitionInterval (New-TimeSpan -Minutes 1)
+        $aSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Minutes 1) -MultipleInstances IgnoreNew
+        Register-ScheduledTask -TaskName $alertTask -Action $aAction -Trigger $aTrigger -Principal $nPrincipal -Settings $aSettings -Description '1분마다 Tailscale 연결 상태를 확인해, 끊기거나 다시 연결되면 Windows 알림으로 알린다.' -Force | Out-Null
+        Write-Report "연결 알림: 1분마다 확인해 끊김·재연결을 알림 (예약 작업 $alertTask)"
     }
 
     # 1) 스크립트 복사 (새 파일은 폴더의 제한된 ACL을 물려받는다)

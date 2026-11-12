@@ -30,6 +30,9 @@ $eventSource = 'TailscaleForceConnect'
 $appDir      = Join-Path $env:ProgramFiles 'Tailscale Force Connect'
 $appName     = 'TailscaleForceConnect'
 $shortcut    = Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu\Programs\Tailscale Force Connect.lnk'
+$notifyTask  = 'Tailscale Force Connect Update Check'
+$alertTask   = 'Tailscale Force Connect Status Alert'
+$protoKey    = 'HKLM:\SOFTWARE\Classes\tailscale-force-connect'
 $script:reportLines = New-Object System.Collections.Generic.List[string]
 
 # 결과 파일은 사용자가 쓸 수 있는 %TEMP%에 있으므로, 이미 있는 파일(링크 포함)에는 쓰지 않고 새로 만들 때만 쓴다.
@@ -57,6 +60,18 @@ try {
         Write-Report "예약 작업 삭제: $taskName"
     } else {
         Write-Report "예약 작업 없음: $taskName"
+    }
+    if (Get-ScheduledTask -TaskName $alertTask -ErrorAction SilentlyContinue) {
+        Unregister-ScheduledTask -TaskName $alertTask -Confirm:$false
+        Write-Report "예약 작업 삭제: $alertTask"
+    }
+    if (Get-ScheduledTask -TaskName $notifyTask -ErrorAction SilentlyContinue) {
+        Unregister-ScheduledTask -TaskName $notifyTask -Confirm:$false
+        Write-Report "예약 작업 삭제: $notifyTask"
+    }
+    if (Test-Path -LiteralPath $protoKey) {
+        Remove-Item -LiteralPath $protoKey -Recurse -Force
+        Write-Report '알림 링크(tailscale-force-connect:) 등록 삭제'
     }
     if (Get-ScheduledTask -TaskName $watchTask -ErrorAction SilentlyContinue) {
         Stop-ScheduledTask -TaskName $watchTask -ErrorAction SilentlyContinue
