@@ -1,6 +1,7 @@
 ﻿# Tailscale 부팅 시 강제 연결 - 제거 (Tailscale 자체와 Unattended 설정은 건드리지 않는다)
 # 관리자 권한이 아니면 UAC로 스스로 다시 실행하고, 관리자 창의 결과를 이 창에 보여 준다.
-param([string]$ResultFile)
+# -FromGui: 관리 창이 실행한 경우. 관리 창이 닫히기를 기다렸다가 지우고, 결과를 메시지 상자로 보여 준다.
+param([string]$ResultFile, [switch]$FromGui)
 
 $ErrorActionPreference = 'Stop'
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
@@ -26,6 +27,10 @@ $taskName    = 'Tailscale Auto Connect'
 $watchTask   = 'Tailscale Auto Reconnect'
 $dir         = 'C:\ProgramData\TailscaleAutoConnect'
 $eventSource = 'TailscaleForceConnect'
+$appDir      = Join-Path $env:ProgramFiles 'Tailscale Force Connect'
+$appName     = 'TailscaleForceConnect'
+$shortcut    = Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu\Programs\Tailscale Force Connect.lnk'
+$script:reportLines = New-Object System.Collections.Generic.List[string]
 
 # 결과 파일은 사용자가 쓸 수 있는 %TEMP%에 있으므로, 이미 있는 파일(링크 포함)에는 쓰지 않고 새로 만들 때만 쓴다.
 $resultWriter = $null
@@ -38,6 +43,7 @@ if ($ResultFile) {
 }
 function Write-Report($m) {
     Write-Host $m
+    $script:reportLines.Add($m)
     if ($resultWriter) { $resultWriter.WriteLine($m) }
 }
 function Test-Reparse($item) { [bool]($item.Attributes -band [IO.FileAttributes]::ReparsePoint) }
@@ -80,6 +86,22 @@ try {
         Write-Report "폴더 없음: $dir"
     }
 
+    # 관리 앱(Program Files)과 시작 메뉴 바로가기. 관리 창이 열려 있으면 실행 파일을 지울 수 없으므로 닫힐 때까지 기다린다.
+    if (Test-Path -LiteralPath $appDir) {
+        $deadline = (Get-Date).AddSeconds(15)
+        while ((Get-Process -Name $appName -ErrorAction SilentlyContinue | Where-Object { $_.Path -and $_.Path.StartsWith($appDir, [StringComparison]::OrdinalIgnoreCase) }) -and (Get-Date) -lt $deadline) {
+            Start-Sleep -Milliseconds 500
+        }
+        Get-Process -Name $appName -ErrorAction SilentlyContinue | Where-Object { $_.Path -and $_.Path.StartsWith($appDir, [StringComparison]::OrdinalIgnoreCase) } | Stop-Process -Force -ErrorAction SilentlyContinue
+        Start-Sleep -Milliseconds 500
+        Remove-Item -LiteralPath $appDir -Recurse -Force
+        Write-Report "관리 앱 삭제: $appDir"
+    }
+    if (Test-Path -LiteralPath $shortcut) {
+        Remove-Item -LiteralPath $shortcut -Force
+        Write-Report '시작 메뉴 바로가기 삭제'
+    }
+
     if ([Diagnostics.EventLog]::SourceExists($eventSource)) {
         Remove-EventLog -Source $eventSource
         Write-Report "이벤트 로그 원본 삭제: $eventSource"
@@ -90,5 +112,11 @@ try {
     Write-Report "제거 오류: $($_.Exception.Message)"
 } finally {
     if ($resultWriter) { $resultWriter.Dispose() }
+}
+if ($FromGui) {
+    # 관리 창은 이미 닫혔으므로 결과를 메시지 상자로 알린다.
+    Add-Type -AssemblyName System.Windows.Forms
+    $icon = if ($exitCode -eq 0) { 'Information' } else { 'Error' }
+    [void][System.Windows.Forms.MessageBox]::Show(($script:reportLines -join "`r`n"), 'Tailscale Force Connect 제거', 'OK', $icon)
 }
 exit $exitCode

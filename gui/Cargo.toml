@@ -1,0 +1,35 @@
+[package]
+name = "tailscale-force-connect"
+version = "1.3.0"
+edition = "2024"
+license = "MIT"
+description = "Management window for tailscale-force-connect"
+publish = false
+
+[[bin]]
+name = "TailscaleForceConnect"
+path = "src/main.rs"
+
+[dependencies]
+# 소프트웨어 렌더러만 쓴다: GPU·OpenGL이 없어도(원격 데스크톱 포함) 그려지고 실행 파일이 작다.
+slint = { version = "1.18.1", default-features = false, features = ["std", "backend-winit", "renderer-software", "compat-1-2", "accessibility"] }
+serde_json = "1.0.154"
+winreg = "0.56.0"
+windows-sys = { version = "0.61.2", features = [
+    "Win32_Foundation",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_System_Threading",
+    "Win32_System_Registry",
+] }
+
+[build-dependencies]
+slint-build = "1.18.1"
+embed-resource = "3.0.12"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
