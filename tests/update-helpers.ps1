@@ -64,6 +64,13 @@ try {
     $msg = try { Install-WithRollback -Installer $newInstaller -InstallArgs @('-NoTest') -App $app -Data $data -Backup $backup -CanRollback $true -NewVersion '9.9.9'; 'no error' } catch { $_.Exception.Message }
     Assert-Equal '설치를 마친 뒤 실패는 되돌리지 않음' ($msg -like '*새 버전은 그대로 둡니다*') $true
     Assert-Equal '새 실행 파일 유지' (Get-Content -LiteralPath (Join-Path $app $appName)) 'new exe'
+
+    # 1-2) 같은 버전 다시 설치(-Force): settings.json에 처음부터 그 버전이 있어도, 이번 실행이 쓰지 않았으면 마친 것으로 보지 않음 → 되돌림
+    Reset-App
+    Set-Content -LiteralPath $newInstaller -Value "Set-Content -LiteralPath '$(Join-Path $app $appName)' -Value 'new exe' -Encoding ASCII`r`nexit 1" -Encoding ASCII
+    $msg = try { Install-WithRollback -Installer $newInstaller -InstallArgs @('-NoTest') -App $app -Data $data -Backup $backup -CanRollback $true -NewVersion '9.9.9'; 'no error' } catch { $_.Exception.Message }
+    Assert-Equal '같은 버전 재설치 도중 실패는 되돌림' ($msg -like '*이전 버전으로 되돌렸습니다*') $true
+    Assert-Equal '같은 버전 재설치 실패 뒤 실행 파일은 이전 것' (Get-Content -LiteralPath (Join-Path $app $appName)) "old $appName"
     Remove-Item -LiteralPath $settingsPath -Force
 
     # 2) 아무것도 바꾸지 않고 실패(로그인 필요 등) → 되돌리지 않음

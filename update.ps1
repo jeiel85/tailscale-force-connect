@@ -67,11 +67,15 @@ function Test-InstallChanged([string]$App, [string]$Backup, [string]$Data) {
     return (Get-HashOrEmpty (Join-Path $Data 'connect.ps1')) -ne (Get-HashOrEmpty (Join-Path $Backup 'data-connect.ps1'))
 }
 
-# install.ps1이 마지막 단계(settings.json에 새 버전 기록)까지 마쳤는지 본다.
+# install.ps1이 이번 실행에서 마지막 단계(settings.json에 새 버전 기록)까지 마쳤는지 본다.
 # install.ps1은 Unattended 설정 실패처럼 나머지를 다 설치하고도 1로 끝나는 경우가 있어, 그때는 되돌리지 않는다.
-function Test-InstallCompleted([string]$Data, [string]$NewVersion) {
+# 같은 버전을 다시 설치(-Force)하면 settings.json에 처음부터 그 버전이 있으므로, 설치 전($BeforeHash)과 내용이 달라졌는지도 본다
+# (install.ps1은 설치 시각 installedAt을 함께 기록한다).
+function Test-InstallCompleted([string]$Data, [string]$NewVersion, [string]$BeforeHash) {
+    $path = Join-Path $Data 'settings.json'
     try {
-        $v = (Get-Content -LiteralPath (Join-Path $Data 'settings.json') -Raw -Encoding UTF8 | ConvertFrom-Json).version
+        if ((Get-HashOrEmpty $path) -eq $BeforeHash) { return $false }
+        $v = (Get-Content -LiteralPath $path -Raw -Encoding UTF8 | ConvertFrom-Json).version
         return [bool]$NewVersion -and "$v" -eq $NewVersion
     } catch { return $false }
 }
@@ -93,10 +97,11 @@ function Write-Report($m) { Write-Host $m; $lines.Add([string]$m) }
 # 새 버전을 설치하고, 실패했는데 파일이 이미 바뀌었으면 백업해 둔 이전 버전의 install.ps1로 다시 설치해
 # 새 파일과 이전 예약 작업이 섞이지 않게 한다. 실패하면 예외를 던진다(메시지에 되돌렸는지 담음).
 function Install-WithRollback([string]$Installer, [string[]]$InstallArgs, [string]$App, [string]$Data, [string]$Backup, [bool]$CanRollback, [string]$NewVersion) {
+    $settingsBefore = Get-HashOrEmpty (Join-Path $Data 'settings.json')
     $r = Invoke-Installer -Installer $Installer -InstallArgs $InstallArgs
     $r.Lines | ForEach-Object { Write-Report "  $_" }
     if ($r.Code -eq 0) { return }
-    if (Test-InstallCompleted -Data $Data -NewVersion $NewVersion) {
+    if (Test-InstallCompleted -Data $Data -NewVersion $NewVersion -BeforeHash $settingsBefore) {
         throw "install.ps1이 새 버전(v$NewVersion) 설치를 마쳤지만 일부 단계가 실패했습니다(종료 코드 $($r.Code)). 위 기록을 확인하세요. 새 버전은 그대로 둡니다."
     }
     if (-not (Test-InstallChanged -App $App -Backup $Backup -Data $Data)) {
