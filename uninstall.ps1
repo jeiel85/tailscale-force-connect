@@ -128,8 +128,14 @@ try {
             if (-not $profileDir) { continue }
             $stateDir = Join-Path $profileDir 'AppData\Local\Tailscale Force Connect'
             if (-not (Test-Path -LiteralPath $stateDir)) { continue }
-            $item = Get-Item -LiteralPath $stateDir -Force
-            if (-not $item.PSIsContainer -or (Test-Reparse $item)) { continue }
+            # 프로필 폴더부터 AppData, Local, 기록 폴더까지 한 단계라도 링크면 건너뛴다.
+            # 중간 폴더(사용자가 바꿀 수 있음)가 링크면 마지막 폴더만 보고는 프로필 밖을 지우는 것을 막지 못한다.
+            $linked = $false
+            foreach ($p in @($profileDir, (Join-Path $profileDir 'AppData'), (Join-Path $profileDir 'AppData\Local'), $stateDir)) {
+                $item = Get-Item -LiteralPath $p -Force
+                if (-not $item.PSIsContainer -or (Test-Reparse $item)) { $linked = $true; break }
+            }
+            if ($linked) { continue }
             foreach ($name in $userFiles) {
                 $f = Join-Path $stateDir $name
                 if (Test-Path -LiteralPath $f) {
