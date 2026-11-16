@@ -20,7 +20,8 @@ slint::include_modules!();
 
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const DATA_DIR: &str = r"C:\ProgramData\TailscaleAutoConnect";
-const LOG_LINES: usize = 9;
+/// 최근 기록 줄 수. 버튼 줄이 늘어 창 높이에 맞춰 줄였다(9 → 7). 전체 기록은 [로그 폴더 열기]로 본다.
+const LOG_LINES: usize = 7;
 
 /// 콤보 상자 항목 순서와 같다: (install.ps1 -ReconnectAfter 값, 분)
 const RECONNECT: [(&str, i64); 5] = [("0", 0), ("30m", 30), ("1h", 60), ("2h", 120), ("4h", 240)];
@@ -34,9 +35,12 @@ struct UiState {
     installed_minutes: AtomicI64,
     /// 콤보 상자 끝에 붙인 '현재 설정' 항목의 분. 없으면 -1
     custom_option: AtomicI64,
+    /// 설치된 멈춤 감시 시간(분). 모르면(1.5.0 이하로 설치) -1
+    installed_heal: AtomicI64,
 }
 
-fn reconnect_arg(minutes: i64) -> String {
+/// install.ps1의 -ReconnectAfter / -HealAfter 값
+fn minutes_arg(minutes: i64) -> String {
     if minutes <= 0 { "0".into() } else { format!("{minutes}m") }
 }
 
@@ -44,6 +48,9 @@ struct Snapshot {
     installed: bool,
     settings_found: bool,
     reconnect_minutes: i64,
+    /// settings.json에 healMinutes가 있는지(1.6.0 이상으로 설치됨)
+    heal_found: bool,
+    heal_minutes: i64,
     state: &'static str,
     title: String,
     detail: String,
@@ -82,6 +89,7 @@ fn main() -> Result<(), slint::PlatformError> {
         index_initialized: AtomicBool::new(false),
         installed_minutes: AtomicI64::new(-1),
         custom_option: AtomicI64::new(-1),
+        installed_heal: AtomicI64::new(-1),
     });
 
     let refresh = {
@@ -129,15 +137,20 @@ fn main() -> Result<(), slint::PlatformError> {
             let custom = state.custom_option.load(Ordering::SeqCst);
             let idx = ui.get_reconnect_index().max(0) as usize;
             let value = if keep_installed && installed >= 0 {
-                reconnect_arg(installed)
+                minutes_arg(installed)
             } else if idx < RECONNECT.len() {
                 RECONNECT[idx].0.to_string()
             } else if custom >= 0 {
-                reconnect_arg(custom) // 콤보 상자 끝의 '현재 설정' 항목
+                minutes_arg(custom) // 콤보 상자 끝의 '현재 설정' 항목
             } else {
                 RECONNECT[2].0.to_string()
             };
             let mut args = format!("-ReconnectAfter {value}");
+            // 멈춤 감시 설정은 관리 창에서 바꾸지 않으므로 설치된 값을 그대로 넘긴다(모르면 install.ps1 기본값).
+            let heal = state.installed_heal.load(Ordering::SeqCst);
+            if heal >= 0 {
+                args.push_str(&format!(" -HealAfter {}", minutes_arg(heal)));
+            }
             if !test {
                 args.push_str(" -NoTest");
             }
@@ -297,6 +310,44 @@ fn main() -> Result<(), slint::PlatformError> {
         });
     }
 
+    // [Tailscale 다시 시작]: 이 실행 파일과 같은 폴더(설치된 경우 Program Files)의 connect.ps1 -Heal을 관리자 권한으로 실행한다.
+    // 트레이 아이콘은 정상인데 다른 기기에서 접속이 안 될 때(서비스가 멈춘 경우) 쓴다.
+    {
+        let weak = ui.as_weak();
+        let refresh = refresh.clone();
+        ui.on_restart_tailscale(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            let Some(script) = sibling("connect.ps1") else {
+                show_result(&ui, false, "스크립트를 찾지 못했습니다", "connect.ps1이 이 실행 파일과 같은 폴더에 있어야 합니다. 한 줄 설치로 다시 설치하세요.");
+                return;
+            };
+            ui.set_result_visible(false);
+            ui.set_busy(true);
+            ui.set_busy_text("관리자 권한 창에서 [예]를 누르세요.".into());
+            let weak = weak.clone();
+            let refresh = refresh.clone();
+            std::thread::spawn(move || {
+                let w = weak.clone();
+                let on_started = move || {
+                    let _ = w.upgrade_in_event_loop(|ui| {
+                        ui.set_busy_text("Tailscale 서비스를 다시 시작하고 연결을 확인하는 중입니다(최대 1분). 그동안 연결이 잠깐 끊깁니다.".into())
+                    });
+                };
+                let outcome = run_elevated(&script, "-Heal", true, on_started);
+                let _ = weak.upgrade_in_event_loop(move |ui| {
+                    ui.set_busy(false);
+                    match outcome {
+                        Ok((0, text)) => show_result(&ui, true, "Tailscale을 다시 시작했습니다", &summarize(&text)),
+                        Ok((2, text)) => show_result(&ui, false, "로그인이 필요합니다", &summarize(&text)),
+                        Ok((code, text)) => show_result(&ui, false, &format!("연결되지 않았습니다 (종료 코드 {code})"), &summarize(&text)),
+                        Err(msg) => show_result(&ui, false, "실행하지 못했습니다", &msg),
+                    }
+                });
+                refresh();
+            });
+        });
+    }
+
     ui.on_open_logs(|| {
         let target = if Path::new(DATA_DIR).exists() { PathBuf::from(DATA_DIR) } else { exe_dir() };
         let _ = Command::new("explorer.exe").arg(target).spawn();
@@ -364,13 +415,27 @@ fn apply_snapshot(ui: &AppWindow, s: &Snapshot, state: &UiState) {
     } else if s.reconnect_minutes <= 0 {
         ("그대로 둠".to_string(), false)
     } else {
-        (format!("{} 뒤 다시 연결", minutes_label(s.reconnect_minutes)), true)
+        (format!("{} 뒤 재연결", minutes_label(s.reconnect_minutes)), true)
     };
     ui.set_reconnect_text(reconnect_text.into());
     ui.set_reconnect_on(reconnect_on);
+    let (heal_text, heal_on) = if !s.installed {
+        ("설치 안 됨".to_string(), false)
+    } else if !s.settings_found {
+        ("다시 설치하면 표시".to_string(), false)
+    } else if !s.heal_found {
+        ("다시 설치하면 켜짐".to_string(), false) // 1.5.0 이하로 설치됨
+    } else if s.heal_minutes <= 0 {
+        ("그대로 둠".to_string(), false)
+    } else {
+        (format!("{} 뒤 재시작", minutes_label(s.heal_minutes)), true)
+    };
+    ui.set_heal_text(heal_text.into());
+    ui.set_heal_on(heal_on);
 
     let known = s.installed && s.settings_found;
     state.installed_minutes.store(if known { s.reconnect_minutes } else { -1 }, Ordering::SeqCst);
+    state.installed_heal.store(if known && s.heal_found { s.heal_minutes } else { -1 }, Ordering::SeqCst);
 
     // 프리셋에 없는 값(예: 한 줄 설치로 넣은 1h30m)은 콤보 상자 끝에 '현재 설정' 항목으로 보여 준다.
     let preset = RECONNECT.iter().position(|(_, m)| *m == s.reconnect_minutes);
@@ -405,18 +470,17 @@ fn collect_snapshot() -> Snapshot {
     let data = Path::new(DATA_DIR);
     let installed = data.join("connect.ps1").exists();
 
-    let (settings_found, reconnect_minutes) = std::fs::read_to_string(data.join("settings.json"))
-        .ok()
-        .and_then(|t| serde_json::from_str::<serde_json::Value>(t.trim_start_matches('\u{feff}')).ok())
-        .and_then(|v| v.get("reconnectMinutes").and_then(|m| m.as_i64()))
-        .map(|m| (true, m))
-        .unwrap_or((false, 0));
+    let settings = read_settings();
+    let setting = |key: &str| settings.as_ref().and_then(|v| v.get(key)).and_then(|m| m.as_i64());
+    let (settings_found, reconnect_minutes) = setting("reconnectMinutes").map(|m| (true, m)).unwrap_or((false, 0));
+    let (heal_found, heal_minutes) = setting("healMinutes").map(|m| (true, m)).unwrap_or((false, 0));
+    let heal_active = if installed && heal_found { heal_minutes } else { 0 };
 
     let (state, title, detail) = match find_tailscale() {
         None => ("missing", "Tailscale 없음".to_string(), "Tailscale을 먼저 설치하고 로그인하세요.".to_string()),
         Some(ts) => match tailscale_status(&ts) {
             None => ("unknown", "상태를 알 수 없음".to_string(), "Tailscale 서비스가 응답하지 않습니다.".to_string()),
-            Some(v) => describe_state(&v, installed, reconnect_minutes),
+            Some(v) => describe_state(&v, installed, reconnect_minutes, heal_active),
         },
     };
 
@@ -424,6 +488,8 @@ fn collect_snapshot() -> Snapshot {
         installed,
         settings_found,
         reconnect_minutes,
+        heal_found,
+        heal_minutes,
         state,
         title,
         detail,
@@ -432,7 +498,8 @@ fn collect_snapshot() -> Snapshot {
     }
 }
 
-fn describe_state(v: &serde_json::Value, installed: bool, reconnect_minutes: i64) -> (&'static str, String, String) {
+/// heal_minutes: 동작 중인 멈춤 감시 시간(분). 꺼져 있거나 설치되지 않았으면 0.
+fn describe_state(v: &serde_json::Value, installed: bool, reconnect_minutes: i64, heal_minutes: i64) -> (&'static str, String, String) {
     let backend = v.get("BackendState").and_then(|s| s.as_str()).unwrap_or("");
     let me = v.get("Self");
     // Tailscale에서 쓰는 이름(DNSName의 첫 부분)을 우선한다. 없으면 Windows 컴퓨터 이름.
@@ -450,6 +517,20 @@ fn describe_state(v: &serde_json::Value, installed: bool, reconnect_minutes: i64
         .unwrap_or("");
     match backend {
         "Running" => {
+            // Self.Online은 조정 서버와 연결돼 있는지를 나타낸다. 꺼져 있으면 트레이는 '연결됨'이어도 다른 기기에서는 offline으로 보인다.
+            // 값이 없으면(예전 Tailscale) 연결된 것으로 본다.
+            let online = me.and_then(|s| s.get("Online")).and_then(|o| o.as_bool()).unwrap_or(true);
+            if !online {
+                let lead = "서버와 연결되지 않았습니다(트레이는 정상으로 보일 수 있음).";
+                let detail = if heal_minutes > 0 {
+                    format!("{lead} {} 넘게 이어지면 자동으로 다시 시작합니다.", minutes_label(heal_minutes))
+                } else if installed {
+                    format!("{lead} 이어지면 [Tailscale 다시 시작]을 누르세요.")
+                } else {
+                    lead.to_string()
+                };
+                return ("stuck", "연결 안 됨".into(), detail);
+            }
             let detail = [host, ip].iter().filter(|s| !s.is_empty()).cloned().collect::<Vec<_>>().join(" · ");
             ("running", "연결됨".into(), detail)
         }
@@ -558,6 +639,11 @@ fn expand_env(s: &str) -> String {
 }
 
 fn tailscale_status(ts: &Path) -> Option<serde_json::Value> {
+    #[cfg(debug_assertions)]
+    if let Ok(path) = std::env::var("TFC_FAKE_STATUS_FILE") {
+        // 개발용: 'tailscale status --json' 대신 이 파일을 읽는다(멈춤 상태 화면 확인)
+        return serde_json::from_str(std::fs::read_to_string(path).ok()?.trim_start_matches('\u{feff}')).ok();
+    }
     let out = Command::new(ts)
         .args(["status", "--json"])
         .creation_flags(CREATE_NO_WINDOW)
@@ -611,11 +697,19 @@ fn user_state_dir() -> PathBuf {
         .join("Tailscale Force Connect")
 }
 
+/// 설치 폴더의 JSON 파일(settings.json, heal-last.json). PowerShell 5.1이 붙이는 BOM은 떼고 읽는다.
+fn read_data_json(name: &str) -> Option<serde_json::Value> {
+    let text = std::fs::read_to_string(Path::new(DATA_DIR).join(name)).ok()?;
+    serde_json::from_str(text.trim_start_matches('\u{feff}')).ok()
+}
+
+fn read_settings() -> Option<serde_json::Value> {
+    read_data_json("settings.json")
+}
+
 /// settings.json에 기록된 자동 재연결 시간(분). 설치되지 않았거나 기록이 없으면 None.
 fn installed_reconnect_minutes() -> Option<i64> {
-    let text = std::fs::read_to_string(Path::new(DATA_DIR).join("settings.json")).ok()?;
-    let v: serde_json::Value = serde_json::from_str(text.trim_start_matches('\u{feff}')).ok()?;
-    v.get("reconnectMinutes")?.as_i64()
+    read_settings()?.get("reconnectMinutes")?.as_i64()
 }
 
 fn current_backend_state() -> Option<String> {
@@ -631,9 +725,11 @@ fn current_backend_state() -> Option<String> {
 /// 끊긴 것을 처음 보면 "끊겼습니다, 약 N분 뒤 다시 연결" 알림을 한 번 띄우고,
 /// 그 뒤 다시 연결되면 "다시 연결됐습니다" 알림으로 마무리한다. 연결돼 있는 동안은 아무것도 하지 않는다.
 fn watch_and_notify() {
+    let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    // 재시작 직후에는 서비스가 아직 응답하지 않을 수 있으므로 상태를 읽기 전에 알린다.
+    notify_heal_if_new(now);
     let Some(state) = current_backend_state() else { return };
     let marker = user_state_dir().join("disconnect-notified.txt");
-    let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
     match state.as_str() {
         "Stopped" => {
             if marker.exists() {
@@ -668,6 +764,55 @@ fn watch_and_notify() {
             show_toast("Tailscale에 다시 연결됐습니다", &body);
         }
         _ => {} // 로그인 필요 등은 관리 창에서 보여 준다
+    }
+}
+
+/// 감시 작업(SYSTEM)이 멈춘 Tailscale을 다시 시작했으면 한 번 알린다. SYSTEM은 사용자 화면에 알림을 띄울 수 없어서
+/// 결과를 heal-last.json에 남기고, 1분마다 도는 이 사용자 작업이 읽어 알린다.
+/// 관리 창에서 직접 누른 재시작(manual)은 결과를 이미 봤으므로 알리지 않는다.
+fn notify_heal_if_new(now: u64) {
+    let Some(v) = read_data_json("heal-last.json") else { return };
+    let at = v.get("at").and_then(|a| a.as_u64()).unwrap_or(0);
+    if at == 0 || v.get("trigger").and_then(|t| t.as_str()) != Some("watch") {
+        return;
+    }
+    // 오래된 기록(이 사용자가 로그인하기 전, 업데이트 직후 등)은 알리지 않는다.
+    if now.saturating_sub(at) > 15 * 60 {
+        return;
+    }
+    let marker = user_state_dir().join("heal-notified.txt");
+    let seen = std::fs::read_to_string(&marker).ok().and_then(|s| s.trim().parse::<u64>().ok()).unwrap_or(0);
+    if at <= seen {
+        return;
+    }
+    let outcome = v.get("outcome").and_then(|o| o.as_str()).unwrap_or("");
+    let minutes = v.get("minutes").and_then(|m| m.as_i64()).unwrap_or(0);
+    let (title, body) = heal_toast_text(outcome, minutes);
+    if show_toast(&title, &body) {
+        let _ = std::fs::create_dir_all(user_state_dir());
+        let _ = std::fs::write(&marker, at.to_string());
+    }
+}
+
+fn heal_toast_text(outcome: &str, minutes: i64) -> (String, String) {
+    let lasted = if minutes > 0 { format!("{} 동안 ", minutes_label(minutes)) } else { String::new() };
+    match outcome {
+        "connected" => (
+            "Tailscale을 다시 시작했습니다".into(),
+            format!("연결된 것처럼 보였지만 {lasted}서버와 연결되지 않아 서비스를 다시 시작했고, 연결이 돌아왔습니다. 누르면 관리 창이 열립니다."),
+        ),
+        "stopped" => (
+            "Tailscale을 다시 시작했습니다".into(),
+            "멈춰 있던 서비스를 다시 시작했습니다. 직접 끊은 상태라 연결은 하지 않았습니다.".into(),
+        ),
+        "login" => (
+            "Tailscale 로그인이 필요합니다".into(),
+            "멈춘 Tailscale을 다시 시작했지만 로그인이 필요합니다(키 만료 등). Tailscale에서 다시 로그인하세요.".into(),
+        ),
+        _ => (
+            "Tailscale을 다시 시작했지만 연결되지 않았습니다".into(),
+            format!("{lasted}서버와 연결되지 않아 서비스를 다시 시작했지만 풀리지 않았습니다. 30분 뒤 다시 시도합니다. 누르면 관리 창이 열립니다."),
+        ),
     }
 }
 
@@ -783,10 +928,45 @@ mod tests {
     }
 
     #[test]
-    fn reconnect_args() {
-        assert_eq!(reconnect_arg(0), "0");
-        assert_eq!(reconnect_arg(-1), "0");
-        assert_eq!(reconnect_arg(90), "90m");
+    fn minutes_args() {
+        assert_eq!(minutes_arg(0), "0");
+        assert_eq!(minutes_arg(-1), "0");
+        assert_eq!(minutes_arg(90), "90m");
+        assert_eq!(minutes_arg(3), "3m");
+    }
+
+    fn status(backend: &str, online: Option<bool>) -> serde_json::Value {
+        let mut me = serde_json::json!({ "DNSName": "pc.tail1234.ts.net.", "TailscaleIPs": ["100.64.0.1"] });
+        if let Some(o) = online {
+            me["Online"] = serde_json::json!(o);
+        }
+        serde_json::json!({ "BackendState": backend, "Self": me })
+    }
+
+    #[test]
+    fn running_but_offline_is_stuck() {
+        // 실제로 겪은 상태: BackendState는 Running인데 Self.Online이 false
+        let (state, title, detail) = describe_state(&status("Running", Some(false)), true, 60, 3);
+        assert_eq!(state, "stuck");
+        assert_eq!(title, "연결 안 됨");
+        assert!(detail.contains("3분"), "{detail}");
+        let (_, _, detail) = describe_state(&status("Running", Some(false)), true, 60, 0);
+        assert!(detail.contains("[Tailscale 다시 시작]"), "{detail}");
+
+        let (state, _, detail) = describe_state(&status("Running", Some(true)), true, 60, 3);
+        assert_eq!(state, "running");
+        assert_eq!(detail, "pc · 100.64.0.1");
+        // Online 값이 없는 예전 Tailscale은 연결된 것으로 본다
+        assert_eq!(describe_state(&status("Running", None), true, 60, 3).0, "running");
+    }
+
+    #[test]
+    fn heal_toasts() {
+        let (title, body) = heal_toast_text("connected", 4);
+        assert_eq!(title, "Tailscale을 다시 시작했습니다");
+        assert!(body.contains("4분 동안"), "{body}");
+        assert!(heal_toast_text("failed", 0).1.starts_with("서버와"));
+        assert_eq!(heal_toast_text("login", 3).0, "Tailscale 로그인이 필요합니다");
     }
 
     #[test]

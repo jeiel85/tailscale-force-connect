@@ -49,32 +49,37 @@ component Chip inherits Rectangle {
     border-radius: 10px;
     background: Theme.chip;
     horizontal-stretch: 1;
-    HorizontalLayout {
-        padding: 12px;
-        spacing: 10px;
-        VerticalLayout {
-            alignment: center;
-            Rectangle {
-                width: 8px;
-                height: 8px;
-                border-radius: 4px;
-                background: dot;
+    // 칩 3개가 한 줄에 들어가도록 점은 이름 옆에 둔다(한글은 글자 사이에서도 줄이 바뀌므로 값 칸을 넓게).
+    VerticalLayout {
+        padding-left: 12px;
+        padding-right: 10px;
+        padding-top: 10px;
+        padding-bottom: 10px;
+        spacing: 3px;
+        HorizontalLayout {
+            spacing: 6px;
+            VerticalLayout {
+                alignment: center;
+                Rectangle {
+                    width: 7px;
+                    height: 7px;
+                    border-radius: 3.5px;
+                    background: dot;
+                }
             }
-        }
-        VerticalLayout {
-            spacing: 2px;
             Text {
                 text: label;
                 color: Theme.muted;
                 font-size: 11px;
+                horizontal-stretch: 1;
             }
-            Text {
-                text: value;
-                color: Theme.ink;
-                font-size: 13px;
-                font-weight: 700;
-                wrap: word-wrap;
-            }
+        }
+        Text {
+            text: value;
+            color: Theme.ink;
+            font-size: 13px;
+            font-weight: 700;
+            wrap: word-wrap;
         }
     }
 }
@@ -155,23 +160,25 @@ component LinkText inherits Rectangle {
 export component AppWindow inherits Window {
     title: "Tailscale Force Connect";
     icon: @image-url("../assets/icon.png");
-    preferred-width: 500px;
-    preferred-height: 720px;
-    min-width: 440px;
-    min-height: 620px;
+    preferred-width: 540px;
+    preferred-height: 770px;
+    min-width: 480px;
+    min-height: 660px;
     background: Theme.bg;
     default-font-family: "Malgun Gothic";
     default-font-size: 14px;
 
-    in property <string> version: "1.5.0";
+    in property <string> version: "1.6.0";
     in property <bool> installed;
-    // running | stopped | login | missing | unknown
+    // running | stuck(켜져 있지만 서버와 연결 안 됨) | stopped | login | missing | unknown
     in property <string> state: "unknown";
     in property <string> state-title: "확인하는 중…";
     in property <string> state-detail;
     in property <string> boot-text: "확인하는 중…";
     in property <string> reconnect-text: "확인하는 중…";
     in property <bool> reconnect-on;
+    in property <string> heal-text: "확인하는 중…";
+    in property <bool> heal-on;
     in property <bool> fast-startup;
     in property <[string]> log-lines;
     in property <[string]> reconnect-options: ["끄기", "30분", "1시간", "2시간", "4시간"];
@@ -198,9 +205,10 @@ export component AppWindow inherits Window {
     callback dismiss-result();
     callback update();
     callback check-update();
+    callback restart-tailscale();
 
     property <color> state-color: root.state == "running" ? Theme.green
-        : root.state == "stopped" ? Theme.amber
+        : (root.state == "stopped" || root.state == "stuck") ? Theme.amber
         : (root.state == "login" || root.state == "missing") ? Theme.red
         : Theme.grey;
 
@@ -344,6 +352,11 @@ export component AppWindow inherits Window {
                         value: root.reconnect-text;
                         dot: root.reconnect-on ? Theme.green : Theme.grey;
                     }
+                    Chip {
+                        label: "멈추면";
+                        value: root.heal-text;
+                        dot: root.heal-on ? Theme.green : Theme.grey;
+                    }
                 }
             }
         }
@@ -357,7 +370,7 @@ export component AppWindow inherits Window {
                     text: "직접 끊은 뒤 자동 재연결";
                 }
                 Text {
-                    text: "트레이에서 Disconnect를 눌러도 이 시간이 지나면 다시 연결합니다(5분마다 확인하므로 몇 분 늦을 수 있음). 연결 상태는 1분마다 확인해서, 끊기거나 다시 연결되면 Windows 알림으로 알려 드립니다.";
+                    text: "트레이에서 Disconnect를 눌러도 이 시간이 지나면 다시 연결합니다(주기적으로 확인하므로 몇 분 늦을 수 있음). 연결 상태는 1분마다 확인해서, 끊기거나 다시 연결되면 Windows 알림으로 알려 드립니다.";
                     color: Theme.muted;
                     font-size: 13px;
                     wrap: word-wrap;
@@ -391,6 +404,25 @@ export component AppWindow inherits Window {
                         alignment: center;
                         Text {
                             text: "연결을 몇 초 끊었다가 다시 연결되는지 봅니다. 원격으로 접속 중이면 누르지 마세요.";
+                            color: Theme.muted;
+                            font-size: 12px;
+                            wrap: word-wrap;
+                        }
+                    }
+                }
+                HorizontalLayout {
+                    spacing: 10px;
+                    Button {
+                        text: "Tailscale 다시 시작";
+                        enabled: !root.busy;
+                        clicked => {
+                            root.restart-tailscale();
+                        }
+                    }
+                    VerticalLayout {
+                        alignment: center;
+                        Text {
+                            text: "트레이는 정상인데 다른 기기에서 접속이 안 될 때 누르세요. 연결이 잠깐 끊깁니다.";
                             color: Theme.muted;
                             font-size: 12px;
                             wrap: word-wrap;
@@ -509,7 +541,7 @@ export component AppWindow inherits Window {
         // 최근 기록 (connect.log)
         Card {
             vertical-stretch: 1;
-            min-height: 150px;
+            min-height: 100px;
             VerticalLayout {
                 padding: 16px;
                 spacing: 10px;

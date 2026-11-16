@@ -2,8 +2,9 @@
 #   powershell -ExecutionPolicy Bypass -File .\install.ps1          # 설치 + 끊긴 상태에서 동작 검증
 #   powershell -ExecutionPolicy Bypass -File .\install.ps1 -NoTest  # 설치만 (연결을 끊지 않음)
 #   ... -ReconnectAfter 30m   # 직접 끊은 뒤 자동 재연결까지의 시간 (기본 1h, 0이면 끔. 단위는 h, m)
+#   ... -HealAfter 5m         # 연결된 것처럼 보이지만 멈춘 상태가 이만큼 이어지면 Tailscale 서비스를 다시 시작 (기본 3m, 0이면 끔)
 # 관리자 권한이 아니면 UAC로 스스로 다시 실행하고, 관리자 창의 결과를 이 창에 보여 준다.
-param([switch]$NoTest, [string]$ReconnectAfter = '1h', [string]$ResultFile)
+param([switch]$NoTest, [string]$ReconnectAfter = '1h', [string]$HealAfter = '3m', [string]$ResultFile)
 
 $ErrorActionPreference = 'Stop'
 $dir         = 'C:\ProgramData\TailscaleAutoConnect'
@@ -11,7 +12,7 @@ $taskName    = 'Tailscale Auto Connect'
 $eventSource = 'TailscaleForceConnect'
 $logFile     = Join-Path $dir 'install.log'
 $watchTask   = 'Tailscale Auto Reconnect'
-$version     = '1.5.0'
+$version     = '1.6.0'
 $appDir      = Join-Path $env:ProgramFiles 'Tailscale Force Connect'   # 관리 앱(GUI)과 스크립트 원본
 $appExe      = 'TailscaleForceConnect.exe'
 $shortcut    = Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu\Programs\Tailscale Force Connect.lnk'
@@ -20,25 +21,39 @@ $protocol    = 'tailscale-force-connect'                # 알림을 누르면 �
 $notifyTask  = 'Tailscale Force Connect Update Check'   # 로그인할 때·매일 새 버전을 확인해 알림 (사용자 권한)
 $alertTask   = 'Tailscale Force Connect Status Alert'   # 1분마다 연결 상태를 보고 끊김·재연결을 알림 (사용자 권한)
 
-# 직접 끊은 뒤 다시 연결할 때까지의 시간. 30m, 1h, 1h30m처럼 h·m 단위로 받는다. 0이면 감시 작업을 만들지 않는다.
+# 시간 값은 30m, 1h, 1h30m처럼 h·m 단위로 받는다. 0(또는 off)이면 끈다. 올바르지 않으면 $null.
+function ConvertTo-Minutes([string]$Value) {
+    $v = "$Value".Trim().ToLower()
+    if (@('0', 'off', '') -contains $v) { return 0 }
+    if ($v -match '^(?:(\d+)h)?(?:(\d+)m)?$') {
+        $m = [int]$Matches[1] * 60 + [int]$Matches[2]
+        if ($m -ge 1) { return $m }
+    }
+    return $null
+}
+
+# 직접 끊은 뒤 다시 연결할 때까지의 시간
 $ReconnectAfter = $ReconnectAfter.Trim().ToLower()
-$reconnectOff = @('0', 'off', '') -contains $ReconnectAfter
-$reconnectMinutes = 0
-if (-not $reconnectOff) {
-    if ($ReconnectAfter -match '^(?:(\d+)h)?(?:(\d+)m)?$' -and $ReconnectAfter -ne '') {
-        $reconnectMinutes = [int]$Matches[1] * 60 + [int]$Matches[2]
-    }
-    if ($reconnectMinutes -lt 1) {
-        Write-Host "-ReconnectAfter 값 '$ReconnectAfter'이(가) 올바르지 않습니다. 30m, 1h, 1h30m처럼 쓰거나 0으로 끄세요." -ForegroundColor Yellow
-        exit 1
-    }
+$reconnectMinutes = ConvertTo-Minutes $ReconnectAfter
+if ($null -eq $reconnectMinutes) {
+    Write-Host "-ReconnectAfter 값 '$ReconnectAfter'이(가) 올바르지 않습니다. 30m, 1h, 1h30m처럼 쓰거나 0으로 끄세요." -ForegroundColor Yellow
+    exit 1
+}
+$reconnectOff = $reconnectMinutes -eq 0
+
+# 멈춤 감시: 연결된 것처럼 보이지만 실제로는 서버와 연결되지 않은 상태가 이만큼 이어지면 Tailscale 서비스를 다시 시작한다.
+$HealAfter = $HealAfter.Trim().ToLower()
+$healMinutes = ConvertTo-Minutes $HealAfter
+if ($null -eq $healMinutes) {
+    Write-Host "-HealAfter 값 '$HealAfter'이(가) 올바르지 않습니다. 3m, 10m처럼 쓰거나 0으로 끄세요." -ForegroundColor Yellow
+    exit 1
 }
 
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 if (-not $isAdmin) {
     # 관리자 창은 끝나자마자 닫히므로 결과를 새 임시 파일로 넘겨받는다(이전 install.log를 잘못 보여 주지 않도록).
     $result  = Join-Path $env:TEMP ('tailscale-force-connect-install-' + [guid]::NewGuid().ToString('N') + '.txt')
-    $argList = "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`" -ResultFile `"$result`" -ReconnectAfter `"$ReconnectAfter`""
+    $argList = "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`" -ResultFile `"$result`" -ReconnectAfter `"$ReconnectAfter`" -HealAfter `"$HealAfter`""
     if ($NoTest) { $argList += ' -NoTest' }
     try {
         $p = Start-Process powershell.exe -Verb RunAs -ArgumentList $argList -PassThru -Wait
@@ -294,25 +309,36 @@ try {
     Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Description 'Tailscale을 부팅 때마다 연결 상태로 만든다 (수동 Disconnect 상태로 재부팅해도).' -Force | Out-Null
     Write-Report "예약 작업 등록: $taskName (시작 시, SYSTEM)"
 
-    # 4-1) 직접 끊은 뒤 자동 재연결: SYSTEM 작업이 주기적으로 상태를 보고, 끊긴 지 N분이 지나면 다시 연결한다.
-    if ($reconnectOff) {
+    # 4-1) 감시 작업(SYSTEM, 주기 실행)이 두 가지를 본다.
+    #      - 직접 끊은 뒤 자동 재연결: 끊긴 지 N분이 지나면 다시 연결한다.
+    #      - 멈춤 감시: 연결된 것처럼 보이지만 서버와 연결되지 않은 상태가 M분 이어지면 Tailscale 서비스를 다시 시작한다.
+    #      둘 다 끄면 작업을 지운다. 다시 설치하면 이전 기록은 지우고 새로 센다.
+    Remove-Item -LiteralPath (Join-Path $dir 'stopped-since.txt') -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath (Join-Path $dir 'stuck-since.json') -Force -ErrorAction SilentlyContinue
+    if ($reconnectOff -and $healMinutes -eq 0) {
         if (Get-ScheduledTask -TaskName $watchTask -ErrorAction SilentlyContinue) {
             Unregister-ScheduledTask -TaskName $watchTask -Confirm:$false
         }
-        Remove-Item -LiteralPath (Join-Path $dir 'stopped-since.txt') -Force -ErrorAction SilentlyContinue
-        Write-Report '자동 재연결: 끔 (-ReconnectAfter 0)'
     } else {
-        $interval  = if ($reconnectMinutes -lt 10) { 1 } else { 5 }   # 확인 주기(분). 실제 재연결은 설정 시간 + 최대 한 주기
-        $wAction   = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument "-NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$dir\connect.ps1`" -Watch -ReconnectAfterMinutes $reconnectMinutes"
+        # 확인 주기(분). 멈춤 감시는 빨리 알아채야 하므로 1분, 자동 재연결만 켜져 있으면 설정 시간에 맞춘다.
+        $interval  = if ($healMinutes -gt 0 -or $reconnectMinutes -lt 10) { 1 } else { 5 }
+        $wAction   = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument "-NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$dir\connect.ps1`" -Watch -ReconnectAfterMinutes $reconnectMinutes -HealAfterMinutes $healMinutes"
         $wTrigger  = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) -RepetitionInterval (New-TimeSpan -Minutes $interval)
-        $wSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Minutes 2) -MultipleInstances IgnoreNew
-        Register-ScheduledTask -TaskName $watchTask -Action $wAction -Trigger $wTrigger -Principal $principal -Settings $wSettings -Description "직접 끊은 Tailscale을 $reconnectMinutes 분 뒤 다시 연결한다." -Force | Out-Null
-        Remove-Item -LiteralPath (Join-Path $dir 'stopped-since.txt') -Force -ErrorAction SilentlyContinue
-        Write-Report "자동 재연결: 직접 끊으면 약 $reconnectMinutes 분 뒤 다시 연결 (예약 작업 $watchTask, $interval 분마다 확인)"
+        # 서비스 재시작(최대 1분)과 연결 확인(최대 1분)이 들어가므로 4분까지 둔다.
+        $wSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Minutes 4) -MultipleInstances IgnoreNew
+        $parts = @()
+        if (-not $reconnectOff) { $parts += "직접 끊은 Tailscale을 $reconnectMinutes 분 뒤 다시 연결" }
+        if ($healMinutes -gt 0) { $parts += "멈춘 Tailscale을 $healMinutes 분 뒤 서비스 재시작으로 복구" }
+        Register-ScheduledTask -TaskName $watchTask -Action $wAction -Trigger $wTrigger -Principal $principal -Settings $wSettings -Description (($parts -join ', ') + '한다.') -Force | Out-Null
+        Write-Report "감시 작업: $watchTask (SYSTEM, $interval 분마다 확인)"
     }
+    if ($reconnectOff) { Write-Report '자동 재연결: 끔 (-ReconnectAfter 0)' }
+    else { Write-Report "자동 재연결: 직접 끊으면 약 $reconnectMinutes 분 뒤 다시 연결" }
+    if ($healMinutes -eq 0) { Write-Report '멈춤 감시: 끔 (-HealAfter 0)' }
+    else { Write-Report "멈춤 감시: 연결된 것처럼 보이지만 $healMinutes 분 동안 서버와 연결되지 않으면 Tailscale 서비스를 다시 시작" }
 
     # 4-2) 관리 창이 관리자 권한 없이 읽을 수 있는 설정 요약 (폴더 ACL상 Users는 읽기만 가능)
-    $settings = [ordered]@{ version = $version; reconnectMinutes = $reconnectMinutes; installedAt = (Get-Date).ToString('s') }
+    $settings = [ordered]@{ version = $version; reconnectMinutes = $reconnectMinutes; healMinutes = $healMinutes; installedAt = (Get-Date).ToString('s') }
     Set-Content -LiteralPath (Join-Path $dir 'settings.json') -Value ($settings | ConvertTo-Json) -Encoding UTF8
     Write-Report "설정 기록: $dir\settings.json (v$version)"
 

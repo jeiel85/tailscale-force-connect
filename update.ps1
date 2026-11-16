@@ -80,19 +80,28 @@ try {
     $installer = Join-Path $stage 'tailscale-force-connect\install.ps1'
     if (-not (Test-Path -LiteralPath $installer)) { throw '받은 패키지에 install.ps1이 없습니다.' }
 
-    # 4) 기존 자동 재연결 설정 유지
+    # 4) 기존 설정 유지 (자동 재연결, 멈춤 감시). 기록이 없으면(예전 버전) 새 버전의 기본값을 쓴다.
     $reconnect = '1h'
+    $heal = $null
     try {
         $settings = Get-Content -LiteralPath (Join-Path $dataDir 'settings.json') -Raw -Encoding UTF8 | ConvertFrom-Json
         if ($null -ne $settings.reconnectMinutes) {
             $reconnect = if ([int]$settings.reconnectMinutes -le 0) { '0' } else { "$([int]$settings.reconnectMinutes)m" }
         }
+        if ($null -ne $settings.healMinutes) {
+            $heal = if ([int]$settings.healMinutes -le 0) { '0' } else { "$([int]$settings.healMinutes)m" }
+        }
     } catch { }
     Write-Report "자동 재연결 설정 유지: $reconnect"
+    $installArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $installer, '-NoTest', '-ReconnectAfter', $reconnect)
+    if ($heal) {
+        $installArgs += @('-HealAfter', $heal)
+        Write-Report "멈춤 감시 설정 유지: $heal"
+    }
 
     # 5) 설치 (연결을 끊는 확인 단계는 건너뜀)
     $ErrorActionPreference = 'Continue'
-    $out = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $installer -NoTest -ReconnectAfter $reconnect 2>&1 | Out-String
+    $out = & powershell.exe @installArgs 2>&1 | Out-String
     $code = $LASTEXITCODE
     $ErrorActionPreference = 'Stop'
     $out -split "`r?`n" | Where-Object { $_.Trim() } | ForEach-Object { Write-Report "  $_" }

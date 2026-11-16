@@ -5,7 +5,9 @@ Windows PC에서 **재부팅할 때마다 Tailscale을 연결 상태로 되돌�
 > **English:** A tiny PowerShell + Task Scheduler setup that makes Tailscale on Windows reconnect on every boot,
 > even if you clicked *Disconnect* before shutting down. It runs as SYSTEM before anyone logs in, keeps your
 > existing `tailscale up` settings, and still lets you disconnect manually — Tailscale reconnects by itself
-> after about 1 hour (configurable): a SYSTEM task checks every 5 minutes and reconnects once it has been off that long.
+> after about 1 hour (configurable): a SYSTEM task checks every minute and reconnects once it has been off that long.
+> The same task restarts the Tailscale service when it looks connected but has actually lost its control-server
+> session for 3 minutes while the internet works (seen after waking from Modern Standby).
 
 🌐 소개 페이지: <https://jeiel85.github.io/tailscale-force-connect/>
 
@@ -15,11 +17,17 @@ Tailscale은 마지막 연결 상태를 기억합니다. 트레이에서 **Disco
 끊긴 상태가 그대로 유지됩니다. 원격으로 접속해야 하는 PC가 정전이나 강제 재부팅 뒤에 끊긴 채로 켜지면
 그 PC 앞으로 직접 가야 합니다.
 
-이 도구는 두 가지를 합니다.
+끊긴 것도 아닌데 접속이 안 될 때도 있습니다. 절전(모던 스탠바이)에서 깨어난 뒤 인터넷은 되는데 Tailscale이
+"network is down" 상태에 머물러, **트레이 아이콘은 '연결됨'인데 다른 기기에서는 offline**으로 보인 적이 있습니다.
+Tailscale 서비스를 다시 시작하자 바로 풀렸습니다.
+
+이 도구는 세 가지를 합니다.
 
 1. **부팅할 때:** SYSTEM 권한으로 `tailscale up`을 실행해 끊긴 상태를 덮어씁니다.
-2. **평소에 직접 끊었을 때:** SYSTEM 예약 작업 `Tailscale Auto Reconnect`가 5분마다 상태를 확인해, 끊긴 상태가
+2. **평소에 직접 끊었을 때:** SYSTEM 예약 작업 `Tailscale Auto Reconnect`가 1분마다 상태를 확인해, 끊긴 상태가
    **1시간** 넘게 이어지면 다시 연결합니다. 트레이 메뉴로 끊었든 `tailscale down`으로 끊었든 똑같이 동작합니다.
+3. **연결된 척 멈췄을 때(멈춤 감시):** 같은 작업이, 연결된 것처럼 보이지만 서버와 연결되지 않은 상태가 인터넷이 되는데도
+   **3분** 넘게 이어지면 Tailscale 서비스를 다시 시작하고 Windows 알림으로 알립니다.
 
 ## 먼저 공식 기능을 검토하세요
 
@@ -39,10 +47,10 @@ Tailscale Windows 클라이언트 **1.84 이상**에는 비슷한 목적의 [시
 
 설치하면 **Tailscale Force Connect** 관리 창이 함께 설치되고, 시작 메뉴에서 열 수 있습니다. 트레이에 상주하지 않고 열었을 때만 동작합니다.
 
-- 지금 연결 상태와 Tailscale 기기 이름·IP
-- 부팅 시 자동 연결, 직접 끊은 뒤 자동 재연결 설정. 끊긴 상태라면 몇 분 뒤 다시 연결되는지도 보여 줍니다.
+- 지금 연결 상태와 Tailscale 기기 이름·IP. 트레이는 '연결됨'인데 실제로는 서버와 연결되지 않았으면 **연결 안 됨**(주황)으로 보여 줍니다.
+- 부팅 시 자동 연결, 직접 끊은 뒤 자동 재연결, 멈춤 감시 설정. 끊긴 상태라면 몇 분 뒤 다시 연결되는지도 보여 줍니다.
 - 최근 기록(`connect.log`)
-- 버튼: 재연결 시간 바꾸기, 동작 확인, 제거. 이 버튼을 누를 때만 UAC 창이 뜹니다.
+- 버튼: 재연결 시간 바꾸기, 동작 확인, **Tailscale 다시 시작**(서비스 재시작), 제거. 이 버튼을 누를 때만 UAC 창이 뜹니다.
 - 새 버전 알림: 창을 열 때 GitHub 최신 릴리스를 확인하고, 새 버전이 있으면 "지금 업데이트할까요?" 알림 창을 띄웁니다. [나중에]를 누르면 위쪽에 [업데이트] 버튼이 있는 알림만 남습니다. 머리글의 버전 표시(예: `v1.5.0`)를 누르면 언제든 직접 확인할 수 있습니다(아래 "업데이트" 참고).
 
 ## Windows 알림
@@ -53,6 +61,7 @@ Tailscale Windows 클라이언트 **1.84 이상**에는 비슷한 목적의 [시
 |---|---|---|
 | **Tailscale 연결이 끊겼습니다** — 약 N분 뒤 자동으로 다시 연결합니다 | 1분마다 상태를 확인하다가 끊긴 것을 처음 봤을 때(한 번만) | 관리 창이 열림 |
 | **Tailscale에 다시 연결됐습니다** | 끊김 알림을 띄운 뒤 연결이 돌아왔을 때 | 관리 창이 열림 |
+| **Tailscale을 다시 시작했습니다** — N분 동안 서버와 연결되지 않아 서비스를 다시 시작했고 연결이 돌아왔습니다 | 멈춤 감시가 서비스를 다시 시작했을 때(풀리지 않았으면 "다시 시작했지만 연결되지 않았습니다") | 관리 창이 열림 |
 | **새 버전 vX.Y.Z** | 로그인할 때(2분 뒤)와 매일 12:30에 확인해 새 버전이 있을 때(버전마다 한 번) | 관리 창이 열리고 업데이트 창이 뜸 |
 
 - 연결 상태는 **1분마다** 확인합니다. Tailscale이 끊김을 알려 주는 이벤트가 없어서, 상주 프로세스 없이 할 수 있는 가장 빠른 방법입니다.
@@ -79,7 +88,7 @@ Rust와 [Slint](https://slint.dev)로 만들었고(소프트웨어 렌더러), G
 
 1. GitHub 최신 릴리스의 zip을 관리자만 쓸 수 있는 `C:\Program Files\Tailscale Force Connect\` 안의 임시 폴더에 받습니다.
 2. GitHub이 릴리스 파일마다 기록하는 **SHA-256 값과 비교**합니다. 다르거나 기록이 없으면 중단합니다.
-3. 지금의 자동 재연결 설정을 유지한 채 `install.ps1 -NoTest`로 설치합니다. **연결은 끊지 않습니다.**
+3. 지금의 자동 재연결·멈춤 감시 설정을 유지한 채 `install.ps1 -NoTest`로 설치합니다. **연결은 끊지 않습니다.**
 
 새 버전은 자동으로 확인하지만, 설치는 사용자가 눌러야 진행합니다. 사용자 승인 없이 SYSTEM 권한으로 몰래 업데이트하는 방식은 쓰지 않습니다. 그 방식이면 릴리스가 오염됐을 때 받은 코드가 모든 설치 PC에서 곧바로 SYSTEM 권한으로 실행되기 때문입니다([DECISIONS.md](DECISIONS.md)).
 명령으로 업데이트하려면 한 줄 설치를 다시 실행하거나, 관리자 PowerShell에서 `& "C:\Program Files\Tailscale Force Connect\update.ps1"`를 실행합니다.
@@ -124,11 +133,15 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1
   - 방법 3: `install.ps1 -NoTest`
 - 마지막 줄이 `완료 (종료 코드 0)`이고 그 앞에 `검증 성공`이 있으면 설치가 끝난 것입니다. 한 줄 설치는 실패하면 오류를 출력하고 0이 아닌 종료 코드로 끝납니다.
 - Unattended 모드(로그인 전에도 연결 유지)를 켭니다.
-- 직접 끊은 뒤 자동으로 다시 연결될 때까지의 시간을 정합니다. 기본값은 `1h`입니다. 감시 작업이 5분마다 확인하므로 실제로는 설정 시간보다 최대 10분쯤 늦게(끊긴 것을 처음 확인하는 데 한 주기, 시간이 다 된 것을 확인하는 데 한 주기) 다시 연결됩니다.
+- 직접 끊은 뒤 자동으로 다시 연결될 때까지의 시간을 정합니다. 기본값은 `1h`입니다. 감시 작업이 1분마다 확인하므로 실제로는 설정 시간보다 1~2분 늦게 다시 연결됩니다(멈춤 감시를 끄고 10분 이상으로 정하면 5분마다 확인).
   - 바꾸려면: `install.cmd -ReconnectAfter 30m`, 한 줄 설치는 cmd에서 `set TFC_RECONNECT_AFTER=30m && powershell -c "..."`,
     PowerShell에서 `$env:TFC_RECONNECT_AFTER='30m'; irm ... | iex`
-  - 끄려면 값을 `0`으로 줍니다. 이미 등록된 감시 작업이 있으면 지웁니다.
-  - 형식은 `h`·`m` 단위입니다(`30m`, `1h`, `1h30m`). 10분 미만으로 정하면 1분마다 확인합니다.
+  - 끄려면 값을 `0`으로 줍니다.
+  - 형식은 `h`·`m` 단위입니다(`30m`, `1h`, `1h30m`).
+- 멈춤 감시 시간을 정합니다. 기본값은 `3m`입니다. 연결된 것처럼 보이지만 서버와 연결되지 않은 상태가 이만큼 이어지면 Tailscale 서비스를 다시 시작합니다.
+  - 바꾸려면: `install.cmd -HealAfter 10m`, 한 줄 설치는 `set TFC_HEAL_AFTER=10m && ...` / `$env:TFC_HEAL_AFTER='10m'; ...`
+  - 끄려면 값을 `0`으로 줍니다. 자동 재연결과 멈춤 감시를 둘 다 끄면 감시 작업을 지웁니다.
+  - 업데이트해도 두 설정은 그대로 유지됩니다(1.5.0 이하에서 올리면 멈춤 감시가 기본값 `3m`으로 켜집니다).
 
 > **Windows 빠른 시작을 확인하세요.** 빠른 시작이 켜져 있으면(Windows 기본값) **일반 종료 후 전원을 켤 때**는 완전 부팅이 아니라
 > 최대 절전 복귀가 되어 이 작업이 실행되지 않습니다. 재시작과 정전 뒤 부팅에서는 동작합니다. 설치 스크립트가 빠른 시작이 켜진 것을 감지하면 경고를 출력합니다.
@@ -141,8 +154,9 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1
 
 | 파일 | 역할 |
 |---|---|
-| `connect.ps1` | 부팅 때 실행되는 본체입니다. 서비스가 꺼져 있으면 켜고, 연결될 때까지 최대 10분 동안 10초 간격으로 `tailscale up`을 실행합니다. 결과는 로그 파일과 이벤트 로그에 남깁니다. |
-| `install.ps1` | `connect.ps1`을 `C:\ProgramData\TailscaleAutoConnect\`에 복사하고, Unattended 모드를 켜고, 이벤트 로그 원본과 예약 작업 2개(부팅 시 연결, 자동 재연결 감시)를 등록한 뒤 동작을 확인합니다. |
+| `connect.ps1` | 부팅 때 실행되는 본체입니다. 서비스가 꺼져 있으면 켜고, 연결될 때까지 최대 10분 동안 10초 간격으로 `tailscale up`을 실행합니다. 결과는 로그 파일과 이벤트 로그에 남깁니다. `-Watch`는 감시 작업이, `-Heal`(서비스 바로 재시작)은 관리 창의 [Tailscale 다시 시작] 버튼이 실행합니다. |
+| `tests/watch-verdict.ps1` | 감시 판정(멈춤인지, 재시작할 때인지)을 실제 Tailscale 없이 시험합니다. 릴리스 zip에는 들어가지 않습니다. |
+| `install.ps1` | `connect.ps1`을 `C:\ProgramData\TailscaleAutoConnect\`에 복사하고, Unattended 모드를 켜고, 이벤트 로그 원본과 예약 작업(부팅 시 연결, 자동 재연결·멈춤 감시, 알림)을 등록한 뒤 동작을 확인합니다. |
 | `uninstall.ps1` | 예약 작업 2개, 설치 폴더, 이벤트 로그 원본을 지우고 결과를 보여 줍니다. Tailscale 본체와 Unattended 설정은 건드리지 않습니다. |
 | `TailscaleForceConnect.exe --watch-notify` / `--notify-update` / `--notify-test` | 창 없이 끊김·재연결 알림 / 새 버전 알림 / 시험 알림을 띄웁니다(예약 작업이 실행). |
 | `update.ps1` | 최신 릴리스를 받아 SHA-256을 확인한 뒤, 설정을 유지하고 연결을 끊지 않은 채 설치합니다. 관리 창의 [업데이트] 버튼이 실행합니다. |
@@ -158,11 +172,21 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1
 - 예약 작업 **`Tailscale Force Connect Status Alert`**: 로그인한 사용자 권한으로 1분마다 `TailscaleForceConnect.exe --watch-notify`를 실행해 끊김·재연결 알림을 띄웁니다.
 - 예약 작업 **`Tailscale Force Connect Update Check`**: 로그인한 사용자 권한으로 로그인 2분 뒤와 매일 12:30에 `--notify-update`를 실행해 새 버전 알림을 띄웁니다.
 - 레지스트리 `HKLM\SOFTWARE\Classes\tailscale-force-connect`: 알림을 누르면 관리 창을 여는 링크입니다. 알림 표시 기록은 사용자별로 `%LOCALAPPDATA%\Tailscale Force Connect\`에 남습니다.
-- 예약 작업 **`Tailscale Auto Reconnect`**: SYSTEM 계정으로 5분마다 실행됩니다(`connect.ps1 -Watch`). 끊긴 상태(`Stopped`)를 처음 본 시각을
-  설치 폴더의 `stopped-since.txt`에 적어 두고, 설정한 시간이 지나도 끊겨 있으면 `tailscale up`을 실행합니다. 연결돼 있으면 아무 기록도 남기지 않습니다.
-  로그인이 필요한 상태처럼 `tailscale up`으로 풀 수 없는 상태는 건드리지 않습니다.
+- 예약 작업 **`Tailscale Auto Reconnect`**: SYSTEM 계정으로 1분마다 실행됩니다(`connect.ps1 -Watch`). 정상이면 아무 기록도 남기지 않습니다.
+  - 자동 재연결: 끊긴 상태(`Stopped`)를 처음 본 시각을 설치 폴더의 `stopped-since.txt`에 적어 두고, 설정한 시간이 지나도 끊겨 있으면 `tailscale up`을 실행합니다.
+  - 멈춤 감시: 아래 상태가 이어진 시간을 `stuck-since.json`에 적어 두고, 설정한 시간(기본 3분)이 지나면 Tailscale 서비스를 다시 시작합니다.
+    - `Running`인데 서버와 연결되지 않음(`tailscale status --json`의 `Self.Online`이 `false`), 또는 `Starting`에서 넘어가지 않음.
+      이때는 `controlplane.tailscale.com:443`에 TCP로 연결해 보고, **인터넷이 안 되면 진짜 네트워크 문제로 보고 건드리지 않습니다.**
+    - `tailscale status`가 20초 동안 응답하지 않음, 서비스가 꺼져 있음(시작 유형이 '사용 안 함'이면 건드리지 않음).
+    - 절전·꺼짐으로 확인이 7분 넘게 비면 깨어난 직후 바로 재시작하지 않고 처음부터 다시 셉니다. 1분 안에 풀리는 잠깐의 끊김은 로그에도 남기지 않습니다.
+    - 재시작은 서비스를 멈춘 뒤(30초 안에 안 멈추면 `tailscaled`를 끝냄) 다시 켜고, 60초 동안 연결을 확인합니다. 결과는 `heal-last.json`에 남기고,
+      풀리지 않았으면 30분 뒤에 다시 시도합니다(방화벽 등으로 계속 안 될 때 반복해서 재시작하지 않도록). 풀렸다가 다시 멈추면 10분 뒤부터 다시 재시작할 수 있습니다.
+    - 부팅 직후 `Tailscale Auto Connect`가 아직 연결을 재시도하는 중이면 재시작하지 않고 기다립니다.
+    - `tailscale status`에 `Self.Online` 값이 없으면(그 값을 채우지 않는 Tailscale) 연결된 것으로 봅니다.
+  - 로그인이 필요한 상태처럼 `tailscale up`이나 재시작으로 풀 수 없는 상태는 건드리지 않습니다.
 - 이벤트 로그 원본 **`TailscaleForceConnect`**(응용 프로그램 로그): 부팅할 때마다 결과를 남깁니다. ID `1000` 연결됨(정보), `1004` 직접 끊은 뒤 자동 재연결(정보),
-  `1001` 10분 안에 연결 실패, `1002` 로그인 필요, `1003` `tailscale.exe` 없음(이상 오류).
+  `1005` 멈춘 Tailscale을 서비스 재시작으로 복구(정보), `1001` 10분 안에 연결 실패, `1002` 로그인 필요, `1003` `tailscale.exe` 없음,
+  `1006` 서비스를 다시 시작했지만 연결되지 않음(이상 오류).
 - 폴더 `C:\Program Files\Tailscale Force Connect\`: 관리 창과 스크립트 원본입니다. 시작 메뉴 바로가기 **Tailscale Force Connect**도 만듭니다.
 - 폴더 `C:\ProgramData\TailscaleAutoConnect\`: SYSTEM과 Administrators만 쓸 수 있고 Users는 읽기만 할 수 있습니다.
   SYSTEM이 실행하는 스크립트를 일반 사용자가 바꾸지 못하게 하려는 설정입니다.
@@ -170,7 +194,9 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1
   - `uninstall.ps1`: 한 줄로 설치했을 때도 제거할 수 있도록 함께 복사해 둡니다.
   - `connect.log`: 부팅할 때마다 남는 실행 기록입니다. 200KB를 넘으면 최근 500줄만 남깁니다.
   - `install.log`: 마지막 설치 결과입니다.
-  - `settings.json`: 버전과 자동 재연결 시간입니다. 관리 창이 관리자 권한 없이 읽습니다.
+  - `settings.json`: 버전, 자동 재연결 시간, 멈춤 감시 시간입니다. 관리 창이 관리자 권한 없이 읽습니다.
+  - `stopped-since.txt`, `stuck-since.json`, `heal-last.json`: 감시 작업의 기록입니다(끊긴 시각, 멈춘 시각, 마지막 재시작 결과).
+    SYSTEM은 사용자 화면에 알림을 띄울 수 없어서, 1분마다 도는 사용자 알림 작업이 `heal-last.json`을 읽어 재시작 알림을 띄웁니다.
 
 ## 확인과 문제 해결
 
@@ -184,7 +210,12 @@ tailscale status
 ```
 
 이벤트 뷰어 → Windows 로그 → 응용 프로그램에서 원본 `TailscaleForceConnect`로 필터링해도 볼 수 있습니다.
-오류 이벤트(1001~1003)에 작업을 연결하면 실패 알림을 받도록 설정할 수 있습니다.
+오류 이벤트(1001~1003, 1006)에 작업을 연결하면 실패 알림을 받도록 설정할 수 있습니다.
+
+**트레이 아이콘은 정상인데 다른 기기에서 접속이 안 되면** `tailscale status`의 맨 아래 `# Health check:`와 자기 기기 줄의 `offline`을 확인하세요.
+멈춤 감시가 켜져 있으면 몇 분 안에 저절로 풀립니다. 바로 풀려면 관리 창의 **[Tailscale 다시 시작]**을 누르거나, 관리자 PowerShell에서
+`& "C:\Program Files\Tailscale Force Connect\connect.ps1" -Heal`을 실행합니다.
+감시 판정은 `powershell -ExecutionPolicy Bypass -File tests\watch-verdict.ps1`로 시험할 수 있습니다.
 
 `connect.ps1` 종료 코드:
 
@@ -221,7 +252,7 @@ powershell -c "irm https://jeiel85.github.io/tailscale-force-connect/remove.ps1 
 
 [`remove.ps1`](docs/remove.ps1)은 설치할 때 복사해 둔 `C:\ProgramData\TailscaleAutoConnect\uninstall.ps1`을 실행합니다.
 그 파일이 없으면 최신 릴리스 zip을 받아 그 안의 `uninstall.ps1`을 실행합니다.
-예약 작업 2개, 설치 폴더, 관리 창과 시작 메뉴 바로가기, 이벤트 로그 원본을 지우고 결과를 보여 줍니다. 그 밖의 Tailscale 설정은 그대로 남습니다.
+예약 작업, 설치 폴더, 관리 창과 시작 메뉴 바로가기, 이벤트 로그 원본을 지우고 결과를 보여 줍니다. 그 밖의 Tailscale 설정은 그대로 남습니다.
 관리 창의 "제거" 버튼을 두 번 눌러도 됩니다(창이 닫히고 결과 창이 뜹니다).
 
 인터넷을 쓰지 않으려면 zip이나 git으로 받은 폴더에서 `uninstall.cmd`를 더블클릭하거나 아래 명령을 실행하세요.
