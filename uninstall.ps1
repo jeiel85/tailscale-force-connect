@@ -117,6 +117,32 @@ try {
         Write-Report '시작 메뉴 바로가기 삭제'
     }
 
+    # 사용자별 알림 기록(%LOCALAPPDATA%\Tailscale Force Connect). 관리 창과 알림 작업이 사용자 권한으로 만든 것이다.
+    # 사용자가 바꿀 수 있는 위치라, 관리자 권한으로 엉뚱한 곳을 지우지 않도록 링크는 따라가지 않고 이 도구가 만드는 파일 이름만 지운다.
+    $userFiles = @('notified-version.txt', 'disconnect-notified.txt', 'heal-notified.txt', 'notify-off.txt')
+    $cleaned = 0
+    # 주의: $home·$profile은 PowerShell 자동 변수라 다른 이름을 쓴다.
+    foreach ($entry in Get-ChildItem 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList' -ErrorAction SilentlyContinue) {
+        try {
+            $profileDir = [Environment]::ExpandEnvironmentVariables([string](Get-ItemProperty -LiteralPath $entry.PSPath -ErrorAction Stop).ProfileImagePath)
+            if (-not $profileDir) { continue }
+            $stateDir = Join-Path $profileDir 'AppData\Local\Tailscale Force Connect'
+            if (-not (Test-Path -LiteralPath $stateDir)) { continue }
+            $item = Get-Item -LiteralPath $stateDir -Force
+            if (-not $item.PSIsContainer -or (Test-Reparse $item)) { continue }
+            foreach ($name in $userFiles) {
+                $f = Join-Path $stateDir $name
+                if (Test-Path -LiteralPath $f) {
+                    $fi = Get-Item -LiteralPath $f -Force
+                    if (-not $fi.PSIsContainer -and -not (Test-Reparse $fi)) { Remove-Item -LiteralPath $f -Force }
+                }
+            }
+            if (-not (Get-ChildItem -LiteralPath $stateDir -Force)) { Remove-Item -LiteralPath $stateDir -Force }
+            $cleaned++
+        } catch { }
+    }
+    if ($cleaned) { Write-Report "사용자 알림 기록 삭제: $cleaned 명" }
+
     if ([Diagnostics.EventLog]::SourceExists($eventSource)) {
         Remove-EventLog -Source $eventSource
         Write-Report "이벤트 로그 원본 삭제: $eventSource"

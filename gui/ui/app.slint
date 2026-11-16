@@ -168,7 +168,7 @@ export component AppWindow inherits Window {
     default-font-family: "Malgun Gothic";
     default-font-size: 14px;
 
-    in property <string> version: "1.6.0";
+    in property <string> version: "1.7.0";
     in property <bool> installed;
     // running | stuck(켜져 있지만 서버와 연결 안 됨) | stopped | login | missing | unknown
     in property <string> state: "unknown";
@@ -195,6 +195,19 @@ export component AppWindow inherits Window {
     in property <string> update-version;
     in-out property <string> update-status;
     in-out property <bool> show-update-prompt;
+    // Windows 알림(끊김·재연결·멈춤 복구·새 버전). 사용자마다 따로 켜고 끈다.
+    in-out property <bool> notify-on: true;
+    // 원격 접속 중일 때 동작 확인 전에 띄우는 경고
+    in-out property <bool> confirm-test-visible;
+    in property <string> confirm-test-text;
+    // 개발용: 시스템 테마와 상관없이 밝은 테마로 그린다(어두운 테마 PC에서 화면 확인).
+    in property <bool> force-light;
+
+    changed force-light => {
+        if (self.force-light) {
+            Palette.color-scheme = ColorScheme.light;
+        }
+    }
 
     callback install();
     callback apply-reconnect();
@@ -206,6 +219,8 @@ export component AppWindow inherits Window {
     callback update();
     callback check-update();
     callback restart-tailscale();
+    callback notify-toggled(bool);
+    callback confirm-test();
 
     property <color> state-color: root.state == "running" ? Theme.green
         : (root.state == "stopped" || root.state == "stuck") ? Theme.amber
@@ -366,8 +381,22 @@ export component AppWindow inherits Window {
             VerticalLayout {
                 padding: 18px;
                 spacing: 10px;
-                SectionTitle {
-                    text: "직접 끊은 뒤 자동 재연결";
+                HorizontalLayout {
+                    spacing: 10px;
+                    VerticalLayout {
+                        alignment: center;
+                        horizontal-stretch: 1;
+                        SectionTitle {
+                            text: "직접 끊은 뒤 자동 재연결";
+                        }
+                    }
+                    CheckBox {
+                        text: "Windows 알림";
+                        checked <=> root.notify-on;
+                        toggled => {
+                            root.notify-toggled(self.checked);
+                        }
+                    }
                 }
                 Text {
                     text: "트레이에서 Disconnect를 눌러도 이 시간이 지나면 다시 연결합니다(주기적으로 확인하므로 몇 분 늦을 수 있음). 연결 상태는 1분마다 확인해서, 끊기거나 다시 연결되면 Windows 알림으로 알려 드립니다.";
@@ -403,7 +432,7 @@ export component AppWindow inherits Window {
                     VerticalLayout {
                         alignment: center;
                         Text {
-                            text: "연결을 몇 초 끊었다가 다시 연결되는지 봅니다. 원격으로 접속 중이면 누르지 마세요.";
+                            text: "연결을 몇 초 끊었다가 다시 연결되는지 봅니다. 원격으로 접속한 것 같으면 한 번 더 묻습니다.";
                             color: Theme.muted;
                             font-size: 12px;
                             wrap: word-wrap;
@@ -675,6 +704,67 @@ export component AppWindow inherits Window {
                         clicked => {
                             root.show-update-prompt = false;
                             root.update();
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 원격 데스크톱이나 Tailscale로 접속 중인 것 같을 때 동작 확인(연결을 몇 초 끊음) 전에 한 번 더 묻는다.
+    if root.confirm-test-visible && !root.busy: Rectangle {
+        width: 100%;
+        height: 100%;
+        background: Theme.dark ? #000000a0 : #14202B80;
+        TouchArea { }
+        Rectangle {
+            width: min(parent.width - 60px, 400px);
+            height: confirm-layout.preferred-height;
+            border-radius: 14px;
+            background: Theme.card;
+            drop-shadow-blur: 24px;
+            drop-shadow-color: #00000060;
+            confirm-layout := VerticalLayout {
+                padding: 22px;
+                spacing: 12px;
+                HorizontalLayout {
+                    spacing: 10px;
+                    VerticalLayout {
+                        alignment: center;
+                        Rectangle {
+                            width: 10px;
+                            height: 10px;
+                            border-radius: 5px;
+                            background: Theme.amber;
+                        }
+                    }
+                    Text {
+                        text: "원격으로 접속 중인 것 같습니다";
+                        font-size: 16px;
+                        font-weight: 700;
+                        color: Theme.ink;
+                        horizontal-stretch: 1;
+                    }
+                }
+                Text {
+                    text: root.confirm-test-text;
+                    color: Theme.muted;
+                    font-size: 13px;
+                    wrap: word-wrap;
+                }
+                HorizontalLayout {
+                    spacing: 10px;
+                    alignment: end;
+                    Button {
+                        text: "그래도 확인";
+                        clicked => {
+                            root.confirm-test();
+                        }
+                    }
+                    PrimaryButton {
+                        text: "취소";
+                        clicked => {
+                            root.confirm-test-visible = false;
                         }
                     }
                 }

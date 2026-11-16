@@ -4,14 +4,15 @@
 #![windows_subsystem = "windows"]
 
 use std::{
+    io::Read,
     os::windows::process::CommandExt,
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, ExitStatus, Stdio},
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, AtomicI64, Ordering},
     },
-    time::{Duration, SystemTime},
+    time::{Duration, Instant, SystemTime},
 };
 
 use slint::{ComponentHandle, ModelRc, SharedString, Timer, TimerMode, VecModel};
@@ -20,6 +21,10 @@ slint::include_modules!();
 
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const DATA_DIR: &str = r"C:\ProgramData\TailscaleAutoConnect";
+/// 'tailscale status'를 기다리는 최대 시간. 서비스가 멈추면 응답하지 않아 화면이 마지막 상태에 머물렀다.
+const STATUS_TIMEOUT: Duration = Duration::from_secs(10);
+/// 새 버전 확인(PowerShell, 내부 HTTP 제한 15초)과 알림 표시에 기다리는 최대 시간
+const POWERSHELL_TIMEOUT: Duration = Duration::from_secs(45);
 /// 최근 기록 줄 수. 버튼 줄이 늘어 창 높이에 맞춰 줄였다(9 → 7). 전체 기록은 [로그 폴더 열기]로 본다.
 const LOG_LINES: usize = 7;
 
@@ -37,6 +42,47 @@ struct UiState {
     custom_option: AtomicI64,
     /// 설치된 멈춤 감시 시간(분). 모르면(1.5.0 이하로 설치) -1
     installed_heal: AtomicI64,
+    /// 최근 Tailscale로 트래픽이 오간 기기 이름(마지막 상태 조회 기준). 동작 확인 전에 경고한다.
+    active_peers: Mutex<Vec<String>>,
+    /// 원격 접속 경고에서 [계속]을 누르면 실행할 일
+    pending_test: Mutex<Option<PendingTest>>,
+}
+
+/// 연결을 몇 초 끊는 작업. 원격 접속 중이면 한 번 더 확인받고 실행한다.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum PendingTest {
+    /// [동작 확인]
+    Verify,
+    /// [설치하기] + '설치 후 동작 확인'
+    InstallWithTest,
+}
+
+/// 실행 인자로 정하는 동작
+#[derive(Debug, PartialEq)]
+enum LaunchMode {
+    Window,
+    NotifyUpdate,
+    WatchNotify,
+    NotifyTest,
+}
+
+/// tailscale-force-connect: 링크(알림, 웹 페이지)로 열리면 다른 인자는 보지 않고 창만 연다.
+/// 링크 문자열은 웹 페이지가 정할 수 있으므로, 링크로 창 없는 동작이 실행되지 않게 한다.
+/// (등록된 명령은 "exe" "%1"이라 첫 인자는 항상 링크 이름으로 시작한다.)
+fn launch_mode(args: &[String]) -> LaunchMode {
+    if args.iter().any(|a| a.trim_matches('"').to_ascii_lowercase().starts_with("tailscale-force-connect:")) {
+        return LaunchMode::Window;
+    }
+    let has = |flag: &str| args.iter().any(|a| a == flag);
+    if has("--notify-update") {
+        LaunchMode::NotifyUpdate
+    } else if has("--watch-notify") {
+        LaunchMode::WatchNotify
+    } else if has("--notify-test") {
+        LaunchMode::NotifyTest
+    } else {
+        LaunchMode::Window
+    }
 }
 
 /// install.ps1의 -ReconnectAfter / -HealAfter 값
@@ -56,6 +102,7 @@ struct Snapshot {
     detail: String,
     log: Vec<String>,
     fast_startup: bool,
+    active_peers: Vec<String>,
 }
 
 /// Windows 알림의 앱 ID. install.ps1이 시작 메뉴 바로가기에 같은 값을 기록한다.
@@ -65,24 +112,32 @@ fn main() -> Result<(), slint::PlatformError> {
     // 창 없이 동작하는 모드. 예약 작업 'Tailscale Force Connect Update Check'가 --notify-update로 실행한다.
     // (알림을 눌러 tailscale-force-connect: 링크로 열리면 인자가 붙지만, 그때는 평소처럼 창을 연다.)
     let args: Vec<String> = std::env::args().skip(1).collect();
-    if args.iter().any(|a| a == "--notify-update") {
-        notify_if_update_available();
-        return Ok(());
-    }
-    if args.iter().any(|a| a == "--watch-notify") {
-        watch_and_notify();
-        return Ok(());
-    }
-    if args.iter().any(|a| a == "--notify-test") {
-        show_toast(
-            "Tailscale Force Connect 알림 시험",
-            "새 버전이 나오면 이렇게 알려 드립니다. 누르면 관리 창이 열립니다.",
-        );
-        return Ok(());
+    match launch_mode(&args) {
+        LaunchMode::NotifyUpdate => {
+            notify_if_update_available();
+            return Ok(());
+        }
+        LaunchMode::WatchNotify => {
+            watch_and_notify();
+            return Ok(());
+        }
+        LaunchMode::NotifyTest => {
+            show_toast(
+                "Tailscale Force Connect 알림 시험",
+                "새 버전이 나오면 이렇게 알려 드립니다. 누르면 관리 창이 열립니다.",
+            );
+            return Ok(());
+        }
+        LaunchMode::Window => {}
     }
 
     let ui = AppWindow::new()?;
     ui.set_version(env!("CARGO_PKG_VERSION").into());
+    ui.set_notify_on(notifications_enabled());
+    #[cfg(debug_assertions)]
+    if std::env::var_os("TFC_FORCE_LIGHT").is_some() {
+        ui.set_force_light(true); // 개발용: 어두운 테마 PC에서 밝은 테마 화면 확인
+    }
 
     let refreshing = Arc::new(AtomicBool::new(false));
     let state = Arc::new(UiState {
@@ -90,6 +145,8 @@ fn main() -> Result<(), slint::PlatformError> {
         installed_minutes: AtomicI64::new(-1),
         custom_option: AtomicI64::new(-1),
         installed_heal: AtomicI64::new(-1),
+        active_peers: Mutex::new(Vec::new()),
+        pending_test: Mutex::new(None),
     });
 
     let refresh = {
@@ -188,13 +245,45 @@ fn main() -> Result<(), slint::PlatformError> {
         })
     };
 
+    // 연결을 몇 초 끊는 작업(동작 확인, 설치 후 동작 확인)
+    let run_test = {
+        let run = run_install.clone();
+        Arc::new(move |kind: PendingTest| match kind {
+            PendingTest::Verify => run(true, true, "연결을 몇 초 끊었다가 다시 연결되는지 확인하는 중입니다. 설정은 바꾸지 않습니다.", "동작을 확인했습니다"),
+            PendingTest::InstallWithTest => run(true, false, "설치하고 동작을 확인하는 중입니다. 연결이 몇 초 끊깁니다.", "설치했습니다"),
+        })
+    };
+    // 원격 데스크톱이나 Tailscale로 접속 중인 것 같으면 경고를 띄우고 [계속]을 기다린다. 아니면 바로 실행한다.
+    let request_test = {
+        let weak = ui.as_weak();
+        let state = state.clone();
+        let run_test = run_test.clone();
+        Arc::new(move |kind: PendingTest| {
+            let peers = state.active_peers.lock().map(|p| p.clone()).unwrap_or_default();
+            match remote_risk(&peers) {
+                Some(text) => {
+                    let Some(ui) = weak.upgrade() else { return };
+                    if let Ok(mut pending) = state.pending_test.lock() {
+                        *pending = Some(kind);
+                    }
+                    ui.set_confirm_test_text(text.into());
+                    ui.set_confirm_test_visible(true);
+                }
+                None => run_test(kind),
+            }
+        })
+    };
     {
         let run = run_install.clone();
+        let request_test = request_test.clone();
         let weak = ui.as_weak();
         ui.on_install(move || {
             let test = weak.upgrade().map(|ui| ui.get_run_test()).unwrap_or(false);
-            let text = if test { "설치하고 동작을 확인하는 중입니다. 연결이 몇 초 끊깁니다." } else { "설치하는 중입니다." };
-            run(test, false, text, "설치했습니다");
+            if test {
+                request_test(PendingTest::InstallWithTest);
+            } else {
+                run(false, false, "설치하는 중입니다.", "설치했습니다");
+            }
         });
     }
     {
@@ -202,8 +291,33 @@ fn main() -> Result<(), slint::PlatformError> {
         ui.on_apply_reconnect(move || run(false, false, "자동 재연결 설정을 바꾸는 중입니다.", "설정을 바꿨습니다"));
     }
     {
-        let run = run_install.clone();
-        ui.on_verify(move || run(true, true, "연결을 몇 초 끊었다가 다시 연결되는지 확인하는 중입니다. 설정은 바꾸지 않습니다.", "동작을 확인했습니다"));
+        let request_test = request_test.clone();
+        ui.on_verify(move || request_test(PendingTest::Verify));
+    }
+    {
+        let weak = ui.as_weak();
+        let state = state.clone();
+        let run_test = run_test.clone();
+        ui.on_confirm_test(move || {
+            if let Some(ui) = weak.upgrade() {
+                ui.set_confirm_test_visible(false);
+            }
+            let kind = state.pending_test.lock().ok().and_then(|mut pending| pending.take());
+            if let Some(kind) = kind {
+                run_test(kind);
+            }
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        ui.on_notify_toggled(move |on| {
+            if let Err(e) = set_notifications_enabled(on) {
+                if let Some(ui) = weak.upgrade() {
+                    ui.set_notify_on(!on);
+                    show_result(&ui, false, "알림 설정을 바꾸지 못했습니다", &e.to_string());
+                }
+            }
+        });
     }
 
     {
@@ -349,7 +463,7 @@ fn main() -> Result<(), slint::PlatformError> {
     }
 
     ui.on_open_logs(|| {
-        let target = if Path::new(DATA_DIR).exists() { PathBuf::from(DATA_DIR) } else { exe_dir() };
+        let target = if data_dir().exists() { data_dir() } else { exe_dir() };
         let _ = Command::new("explorer.exe").arg(target).spawn();
     });
     ui.on_open_url(|url| {
@@ -432,6 +546,9 @@ fn apply_snapshot(ui: &AppWindow, s: &Snapshot, state: &UiState) {
     };
     ui.set_heal_text(heal_text.into());
     ui.set_heal_on(heal_on);
+    if let Ok(mut peers) = state.active_peers.lock() {
+        peers.clone_from(&s.active_peers);
+    }
 
     let known = s.installed && s.settings_found;
     state.installed_minutes.store(if known { s.reconnect_minutes } else { -1 }, Ordering::SeqCst);
@@ -467,7 +584,7 @@ fn minutes_label(m: i64) -> String {
 }
 
 fn collect_snapshot() -> Snapshot {
-    let data = Path::new(DATA_DIR);
+    let data = data_dir();
     let installed = data.join("connect.ps1").exists();
 
     let settings = read_settings();
@@ -476,11 +593,24 @@ fn collect_snapshot() -> Snapshot {
     let (heal_found, heal_minutes) = setting("healMinutes").map(|m| (true, m)).unwrap_or((false, 0));
     let heal_active = if installed && heal_found { heal_minutes } else { 0 };
 
+    let mut active_peers = Vec::new();
     let (state, title, detail) = match find_tailscale() {
         None => ("missing", "Tailscale 없음".to_string(), "Tailscale을 먼저 설치하고 로그인하세요.".to_string()),
         Some(ts) => match tailscale_status(&ts) {
-            None => ("unknown", "상태를 알 수 없음".to_string(), "Tailscale 서비스가 응답하지 않습니다.".to_string()),
-            Some(v) => describe_state(&v, installed, reconnect_minutes, heal_active),
+            Err(StatusError::TimedOut) => {
+                // 감시 작업도 이 상태를 멈춤으로 보고 서비스를 다시 시작한다.
+                let detail = if heal_active > 0 {
+                    format!("Tailscale이 {}초 동안 응답하지 않습니다. 이어지면 자동으로 다시 시작합니다.", STATUS_TIMEOUT.as_secs())
+                } else {
+                    format!("Tailscale이 {}초 동안 응답하지 않습니다. 이어지면 [Tailscale 다시 시작]을 누르세요.", STATUS_TIMEOUT.as_secs())
+                };
+                ("stuck", "응답 없음".to_string(), detail)
+            }
+            Err(StatusError::Failed) => ("unknown", "상태를 알 수 없음".to_string(), "Tailscale 서비스가 응답하지 않습니다.".to_string()),
+            Ok(v) => {
+                active_peers = active_peer_names(&v);
+                describe_state(&v, installed, reconnect_minutes, heal_active)
+            }
         },
     };
 
@@ -495,7 +625,59 @@ fn collect_snapshot() -> Snapshot {
         detail,
         log: read_log_tail(&data.join("connect.log")),
         fast_startup: fast_startup_enabled(),
+        active_peers,
     }
+}
+
+/// 최근 트래픽이 오간 피어(Peer.Active)의 이름. Tailscale은 대략 '최근 2분 안에 패킷이 오감'으로 정의한다.
+fn active_peer_names(v: &serde_json::Value) -> Vec<String> {
+    let mut names: Vec<String> = v
+        .get("Peer")
+        .and_then(|p| p.as_object())
+        .map(|peers| {
+            peers
+                .values()
+                .filter(|p| p.get("Active").and_then(|a| a.as_bool()) == Some(true))
+                .map(|p| {
+                    p.get("DNSName")
+                        .and_then(|d| d.as_str())
+                        .and_then(|d| d.split('.').next())
+                        .filter(|s| !s.is_empty())
+                        .or_else(|| p.get("HostName").and_then(|h| h.as_str()))
+                        .unwrap_or("이름 없는 기기")
+                        .to_string()
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    names.sort();
+    names
+}
+
+/// 동작 확인(연결을 몇 초 끊음) 전에 원격 접속 중인 것 같은지 본다. 그렇다면 경고 문구.
+fn remote_risk(active_peers: &[String]) -> Option<String> {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_REMOTESESSION};
+    let rdp = unsafe { GetSystemMetrics(SM_REMOTESESSION) } != 0;
+    remote_risk_text(rdp, active_peers)
+}
+
+fn remote_risk_text(rdp: bool, active_peers: &[String]) -> Option<String> {
+    let mut reasons = Vec::new();
+    if rdp {
+        reasons.push("이 창은 원격 데스크톱 세션에서 열려 있습니다.".to_string());
+    }
+    if !active_peers.is_empty() {
+        let shown = active_peers.iter().take(3).cloned().collect::<Vec<_>>().join(", ");
+        let more = if active_peers.len() > 3 { format!(" 외 {}대", active_peers.len() - 3) } else { String::new() };
+        reasons.push(format!("지금 Tailscale로 {shown}{more}와(과) 연결이 오가고 있습니다."));
+    }
+    if reasons.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "{} 동작 확인은 Tailscale 연결을 몇 초 끊습니다. Tailscale로 원격 접속 중이라면 그동안 화면이 끊기고, 다시 연결되지 않으면 원격에서는 되돌릴 수 없습니다.",
+        reasons.join(" ")
+    ))
 }
 
 /// heal_minutes: 동작 중인 멈춤 감시 시간(분). 꺼져 있거나 설치되지 않았으면 0.
@@ -560,7 +742,7 @@ fn describe_state(v: &serde_json::Value, installed: bool, reconnect_minutes: i64
 
 /// 감시 작업이 끊긴 상태를 처음 본 때 만든 stopped-since.txt의 수정 시각으로 경과 시간을 잰다.
 fn stopped_for_minutes() -> Option<i64> {
-    let modified = std::fs::metadata(Path::new(DATA_DIR).join("stopped-since.txt")).ok()?.modified().ok()?;
+    let modified = std::fs::metadata(data_dir().join("stopped-since.txt")).ok()?.modified().ok()?;
     let elapsed = SystemTime::now().duration_since(modified).ok()?;
     Some((elapsed.as_secs() / 60) as i64)
 }
@@ -599,11 +781,7 @@ fn find_tailscale() -> Option<PathBuf> {
         .open_subkey(r"SYSTEM\CurrentControlSet\Services\Tailscale")
         .and_then(|k| k.get_value::<String, _>("ImagePath"))
     {
-        let img = expand_env(img.trim());
-        let daemon = match img.strip_prefix('"') {
-            Some(rest) => rest.split('"').next().unwrap_or("").to_string(),
-            None => img.split_whitespace().next().unwrap_or("").to_string(),
-        };
+        let daemon = daemon_path(&expand_env(img.trim()));
         if let Some(dir) = Path::new(&daemon).parent() {
             let candidate = dir.join("tailscale.exe");
             if candidate.exists() {
@@ -614,6 +792,26 @@ fn find_tailscale() -> Option<PathBuf> {
     let pf = std::env::var("ProgramFiles").unwrap_or_else(|_| r"C:\Program Files".into());
     let candidate = PathBuf::from(pf).join(r"Tailscale\tailscale.exe");
     candidate.exists().then_some(candidate)
+}
+
+/// 서비스 ImagePath에서 실행 파일 경로만 꺼낸다(connect.ps1의 Get-DaemonPath와 같은 규칙).
+/// 따옴표가 없으면 Windows처럼 '.exe'로 끝나는 곳까지를 경로로 본다(공백이 든 경로를 따옴표 없이 등록한 경우).
+fn daemon_path(image_path: &str) -> String {
+    let img = image_path.trim();
+    if let Some(rest) = img.strip_prefix('"') {
+        return rest.split('"').next().unwrap_or("").to_string();
+    }
+    // to_ascii_lowercase는 바이트 길이를 바꾸지 않으므로 같은 위치로 자를 수 있다.
+    let lower = img.to_ascii_lowercase();
+    let mut from = 0;
+    while let Some(i) = lower[from..].find(".exe") {
+        let end = from + i + 4;
+        if end == img.len() || img[end..].starts_with(char::is_whitespace) {
+            return img[..end].to_string();
+        }
+        from = end;
+    }
+    img.split_whitespace().next().unwrap_or("").to_string()
 }
 
 fn expand_env(s: &str) -> String {
@@ -638,18 +836,76 @@ fn expand_env(s: &str) -> String {
     out
 }
 
-fn tailscale_status(ts: &Path) -> Option<serde_json::Value> {
+#[derive(Debug, PartialEq)]
+enum StatusError {
+    /// STATUS_TIMEOUT 안에 끝나지 않음(서비스가 멈춤)
+    TimedOut,
+    /// 실행하지 못했거나 읽을 수 없는 출력(서비스 꺼짐 등)
+    Failed,
+}
+
+fn tailscale_status(ts: &Path) -> Result<serde_json::Value, StatusError> {
     #[cfg(debug_assertions)]
     if let Ok(path) = std::env::var("TFC_FAKE_STATUS_FILE") {
-        // 개발용: 'tailscale status --json' 대신 이 파일을 읽는다(멈춤 상태 화면 확인)
-        return serde_json::from_str(std::fs::read_to_string(path).ok()?.trim_start_matches('\u{feff}')).ok();
+        // 개발용: 'tailscale status --json' 대신 이 파일을 읽는다(멈춤 상태 화면 확인). 'timeout'이면 응답 없음 흉내.
+        if path == "timeout" {
+            return Err(StatusError::TimedOut);
+        }
+        let text = std::fs::read_to_string(path).map_err(|_| StatusError::Failed)?;
+        return serde_json::from_str(text.trim_start_matches('\u{feff}')).map_err(|_| StatusError::Failed);
     }
-    let out = Command::new(ts)
-        .args(["status", "--json"])
+    let (_, out) = run_with_timeout(Command::new(ts).args(["status", "--json"]), STATUS_TIMEOUT).map_err(|e| match e {
+        RunError::TimedOut => StatusError::TimedOut,
+        RunError::Spawn => StatusError::Failed,
+    })?;
+    serde_json::from_slice(&out).map_err(|_| StatusError::Failed)
+}
+
+#[derive(Debug)]
+enum RunError {
+    Spawn,
+    TimedOut,
+}
+
+/// 창 없이 실행하고 timeout까지 기다린다. 넘으면 프로세스를 끝낸다. (종료 상태, 표준 출력)을 돌려준다.
+fn run_with_timeout(cmd: &mut Command, timeout: Duration) -> Result<(ExitStatus, Vec<u8>), RunError> {
+    let mut child = cmd
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
         .creation_flags(CREATE_NO_WINDOW)
-        .output()
-        .ok()?;
-    serde_json::from_slice(&out.stdout).ok()
+        .spawn()
+        .map_err(|_| RunError::Spawn)?;
+    // 출력은 다른 스레드에서 읽어야 파이프가 가득 차서 멈추지 않는다.
+    let mut stdout = child.stdout.take();
+    let reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(out) = stdout.as_mut() {
+            let _ = out.read_to_end(&mut buf);
+        }
+        buf
+    });
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Ok((status, reader.join().unwrap_or_default())),
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(50)),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(RunError::TimedOut);
+            }
+        }
+    }
+}
+
+/// 설치 폴더(connect.ps1, settings.json, 기록). 개발 빌드에서는 TFC_DATA_DIR로 바꿔 화면을 확인한다.
+fn data_dir() -> PathBuf {
+    #[cfg(debug_assertions)]
+    if let Some(dir) = std::env::var_os("TFC_DATA_DIR") {
+        return PathBuf::from(dir);
+    }
+    PathBuf::from(DATA_DIR)
 }
 
 fn exe_dir() -> PathBuf {
@@ -677,14 +933,15 @@ fn latest_release_version() -> Option<String> {
         return Some(fake); // 개발용: 업데이트 알림 화면 확인
     }
     let script = "try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor 3072 } catch { };         (Invoke-RestMethod -UseBasicParsing -TimeoutSec 15 -Uri 'https://api.github.com/repos/jeiel85/tailscale-force-connect/releases/latest'         -Headers @{ 'User-Agent' = 'tailscale-force-connect-updater'; 'Accept' = 'application/vnd.github+json' }).tag_name";
-    let out = Command::new("powershell.exe")
-        .args(["-NoProfile", "-NonInteractive", "-Command", script])
-        // PowerShell 7에서 상속된 모듈 경로가 Windows PowerShell 5.1에 섞이지 않게 한다.
-        .env_remove("PSModulePath")
-        .creation_flags(CREATE_NO_WINDOW)
-        .output()
-        .ok()?;
-    let tag = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let (_, out) = run_with_timeout(
+        Command::new("powershell.exe")
+            .args(["-NoProfile", "-NonInteractive", "-Command", script])
+            // PowerShell 7에서 상속된 모듈 경로가 Windows PowerShell 5.1에 섞이지 않게 한다.
+            .env_remove("PSModulePath"),
+        POWERSHELL_TIMEOUT,
+    )
+    .ok()?;
+    let tag = String::from_utf8_lossy(&out).trim().to_string();
     let v = tag.trim_start_matches('v').to_string();
     parse_version(&v).map(|_| v)
 }
@@ -697,9 +954,32 @@ fn user_state_dir() -> PathBuf {
         .join("Tailscale Force Connect")
 }
 
+/// 알림을 끈 사용자의 표시 파일. 관리 창의 'Windows 알림' 선택으로 만들고 지운다(관리자 권한 불필요).
+/// 예약 작업은 그대로 1분마다 돌지만, 이 파일이 있으면 아무것도 띄우지 않고 바로 끝난다.
+fn notify_off_marker() -> PathBuf {
+    user_state_dir().join("notify-off.txt")
+}
+
+fn notifications_enabled() -> bool {
+    !notify_off_marker().exists()
+}
+
+fn set_notifications_enabled(on: bool) -> std::io::Result<()> {
+    let marker = notify_off_marker();
+    if on {
+        match std::fs::remove_file(&marker) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+            _ => Ok(()),
+        }
+    } else {
+        std::fs::create_dir_all(user_state_dir())?;
+        std::fs::write(&marker, "Windows 알림을 끈 표시입니다. 관리 창에서 다시 켜면 지워집니다.")
+    }
+}
+
 /// 설치 폴더의 JSON 파일(settings.json, heal-last.json). PowerShell 5.1이 붙이는 BOM은 떼고 읽는다.
 fn read_data_json(name: &str) -> Option<serde_json::Value> {
-    let text = std::fs::read_to_string(Path::new(DATA_DIR).join(name)).ok()?;
+    let text = std::fs::read_to_string(data_dir().join(name)).ok()?;
     serde_json::from_str(text.trim_start_matches('\u{feff}')).ok()
 }
 
@@ -717,7 +997,7 @@ fn current_backend_state() -> Option<String> {
     if let Ok(fake) = std::env::var("TFC_FAKE_STATE") {
         return Some(fake); // 개발용: 끊김 알림 확인
     }
-    let v = tailscale_status(&find_tailscale()?)?;
+    let v = tailscale_status(&find_tailscale()?).ok()?;
     v.get("BackendState")?.as_str().map(str::to_string)
 }
 
@@ -725,6 +1005,9 @@ fn current_backend_state() -> Option<String> {
 /// 끊긴 것을 처음 보면 "끊겼습니다, 약 N분 뒤 다시 연결" 알림을 한 번 띄우고,
 /// 그 뒤 다시 연결되면 "다시 연결됐습니다" 알림으로 마무리한다. 연결돼 있는 동안은 아무것도 하지 않는다.
 fn watch_and_notify() {
+    if !notifications_enabled() {
+        return; // 관리 창에서 알림을 껐다
+    }
     let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
     // 재시작 직후에는 서비스가 아직 응답하지 않을 수 있으므로 상태를 읽기 전에 알린다.
     notify_heal_if_new(now);
@@ -818,6 +1101,9 @@ fn heal_toast_text(outcome: &str, minutes: i64) -> (String, String) {
 
 /// 새 버전이 있고 그 버전을 아직 알리지 않았으면 Windows 알림을 띄운다. 같은 버전은 한 번만 알린다.
 fn notify_if_update_available() {
+    if !notifications_enabled() {
+        return; // 관리 창에서 알림을 껐다(새 버전은 관리 창을 열면 보인다)
+    }
     let Some(latest) = latest_release_version() else { return };
     if !is_newer(&latest, env!("CARGO_PKG_VERSION")) {
         return;
@@ -859,13 +1145,14 @@ $xml.LoadXml(@'\n{xml}\n'@)\n\
 $toast = New-Object Windows.UI.Notifications.ToastNotification $xml\n\
 [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('{APP_ID}').Show($toast)\n"
     );
-    Command::new("powershell.exe")
-        .args(["-NoProfile", "-NonInteractive", "-EncodedCommand", &encode_ps_command(&script)])
-        .env_remove("PSModulePath")
-        .creation_flags(CREATE_NO_WINDOW)
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+    run_with_timeout(
+        Command::new("powershell.exe")
+            .args(["-NoProfile", "-NonInteractive", "-EncodedCommand", &encode_ps_command(&script)])
+            .env_remove("PSModulePath"),
+        POWERSHELL_TIMEOUT,
+    )
+    .map(|(s, _)| s.success())
+    .unwrap_or(false)
 }
 
 /// PowerShell -EncodedCommand 형식: UTF-16LE를 Base64로. 따옴표·한글이 명령줄에서 깨지지 않게 한다.
@@ -967,6 +1254,72 @@ mod tests {
         assert!(body.contains("4분 동안"), "{body}");
         assert!(heal_toast_text("failed", 0).1.starts_with("서버와"));
         assert_eq!(heal_toast_text("login", 3).0, "Tailscale 로그인이 필요합니다");
+    }
+
+    #[test]
+    fn daemon_paths() {
+        let p = r"C:\Program Files\Tailscale\tailscaled.exe";
+        assert_eq!(daemon_path(&format!("\"{p}\"")), p);
+        assert_eq!(daemon_path(&format!("\"{p}\" --port 41641")), p);
+        // 따옴표 없이 등록된 공백 경로(이전에는 C:\Program 에서 잘렸다)
+        assert_eq!(daemon_path(p), p);
+        assert_eq!(daemon_path(&format!("{p} --port 41641")), p);
+        assert_eq!(daemon_path(r"D:\Apps\TAILSCALED.EXE"), r"D:\Apps\TAILSCALED.EXE");
+        assert_eq!(daemon_path(r"  D:\Tailscale\tailscaled.exe"), r"D:\Tailscale\tailscaled.exe");
+        assert_eq!(daemon_path(r"D:\Tailscale\tailscaled --x"), r"D:\Tailscale\tailscaled");
+        assert_eq!(daemon_path(r"D:\a.exes\tailscaled.exe"), r"D:\a.exes\tailscaled.exe");
+    }
+
+    #[test]
+    fn link_launch_opens_window_only() {
+        let a = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(launch_mode(&a(&[])), LaunchMode::Window);
+        assert_eq!(launch_mode(&a(&["--watch-notify"])), LaunchMode::WatchNotify);
+        assert_eq!(launch_mode(&a(&["--notify-update"])), LaunchMode::NotifyUpdate);
+        assert_eq!(launch_mode(&a(&["--notify-test"])), LaunchMode::NotifyTest);
+        assert_eq!(launch_mode(&a(&["tailscale-force-connect:update"])), LaunchMode::Window);
+        // 웹 페이지가 링크에 인자를 끼워 넣어도 창만 연다
+        assert_eq!(launch_mode(&a(&["tailscale-force-connect:x", "--notify-update"])), LaunchMode::Window);
+        assert_eq!(launch_mode(&a(&["TAILSCALE-FORCE-CONNECT:--watch-notify"])), LaunchMode::Window);
+        assert_eq!(launch_mode(&a(&["\"tailscale-force-connect:x\"", "--watch-notify"])), LaunchMode::Window);
+    }
+
+    #[test]
+    fn remote_warning() {
+        assert_eq!(remote_risk_text(false, &[]), None);
+        let rdp = remote_risk_text(true, &[]).unwrap();
+        assert!(rdp.contains("원격 데스크톱"), "{rdp}");
+        let peers: Vec<String> = ["a", "b", "c", "d", "e"].iter().map(|s| s.to_string()).collect();
+        let t = remote_risk_text(false, &peers).unwrap();
+        assert!(t.contains("a, b, c 외 2대"), "{t}");
+        assert!(!t.contains("원격 데스크톱 세션"), "{t}");
+    }
+
+    #[test]
+    fn active_peers_from_status() {
+        let v = serde_json::json!({
+            "BackendState": "Running",
+            "Peer": {
+                "k1": { "DNSName": "laptop.tail1234.ts.net.", "HostName": "LAPTOP-1", "Active": true },
+                "k2": { "DNSName": "", "HostName": "phone", "Active": true },
+                "k3": { "DNSName": "server.tail1234.ts.net.", "Active": false },
+                "k4": { "HostName": "old" }
+            }
+        });
+        assert_eq!(active_peer_names(&v), vec!["laptop".to_string(), "phone".to_string()]);
+        assert!(active_peer_names(&serde_json::json!({ "BackendState": "Stopped" })).is_empty());
+    }
+
+    #[test]
+    fn timeout_kills_hung_process() {
+        let started = Instant::now();
+        let r = run_with_timeout(Command::new("cmd.exe").args(["/c", "ping -n 6 127.0.0.1 >nul"]), Duration::from_millis(300));
+        assert!(matches!(r, Err(RunError::TimedOut)), "{r:?}");
+        assert!(started.elapsed() < Duration::from_secs(3), "{:?}", started.elapsed());
+        let (status, out) = run_with_timeout(Command::new("cmd.exe").args(["/c", "echo hello"]), Duration::from_secs(10)).unwrap();
+        assert!(status.success());
+        assert_eq!(String::from_utf8_lossy(&out).trim(), "hello");
+        assert!(matches!(run_with_timeout(&mut Command::new("no-such-program-xyz.exe"), Duration::from_secs(1)), Err(RunError::Spawn)));
     }
 
     #[test]

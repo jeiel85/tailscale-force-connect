@@ -12,7 +12,7 @@ $taskName    = 'Tailscale Auto Connect'
 $eventSource = 'TailscaleForceConnect'
 $logFile     = Join-Path $dir 'install.log'
 $watchTask   = 'Tailscale Auto Reconnect'
-$version     = '1.6.0'
+$version     = '1.7.0'
 $appDir      = Join-Path $env:ProgramFiles 'Tailscale Force Connect'   # 관리 앱(GUI)과 스크립트 원본
 $appExe      = 'TailscaleForceConnect.exe'
 $shortcut    = Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu\Programs\Tailscale Force Connect.lnk'
@@ -87,16 +87,35 @@ function Write-Report($m) {
     if ($script:resultWriter) { $script:resultWriter.WriteLine($m) }
     if ($script:logReady) { Add-Content -LiteralPath $logFile -Value $m -Encoding UTF8 }
 }
+# 'tailscale status --json'의 BackendState. 서비스가 멈추면 응답하지 않을 수 있어 20초까지만 기다린다(업데이트가 멈추지 않도록).
 function Get-TsState {
     if (-not $ts) { return $null }
-    try { (& $ts status --json 2>$null | Out-String | ConvertFrom-Json).BackendState } catch { $null }
+    try {
+        $psi = New-Object Diagnostics.ProcessStartInfo
+        $psi.FileName = $ts
+        $psi.Arguments = 'status --json'
+        $psi.UseShellExecute = $false
+        $psi.RedirectStandardOutput = $true
+        $psi.RedirectStandardError = $true
+        $psi.CreateNoWindow = $true
+        $psi.StandardOutputEncoding = New-Object Text.UTF8Encoding $false
+        $p = [Diagnostics.Process]::Start($psi)
+        $out = $p.StandardOutput.ReadToEndAsync()
+        $null = $p.StandardError.ReadToEndAsync()
+        if (-not $p.WaitForExit(20000)) { try { $p.Kill() } catch { }; return '응답 없음' }
+        return ($out.Result | ConvertFrom-Json).BackendState
+    } catch { return $null }
 }
 # connect.ps1의 같은 이름 함수와 동일하게 유지한다: 서비스와 같은 폴더의 tailscale.exe를 찾는다.
+function Get-DaemonPath([string]$ImagePath) {
+    if ($ImagePath -match '^\s*"([^"]+)"') { return $Matches[1] }
+    if ($ImagePath -match '^\s*(.+?\.exe)(?=\s|$)') { return $Matches[1] }
+    return ($ImagePath.Trim() -split '\s+')[0]
+}
 function Find-TailscaleExe {
     try {
         $img = (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Services\Tailscale' -ErrorAction Stop).ImagePath
-        $img = [Environment]::ExpandEnvironmentVariables($img)
-        $daemon = if ($img -match '^\s*"([^"]+)"') { $Matches[1] } else { ($img.Trim() -split '\s+')[0] }
+        $daemon = Get-DaemonPath ([Environment]::ExpandEnvironmentVariables($img))
         $candidate = Join-Path (Split-Path $daemon -Parent) 'tailscale.exe'
         if (Test-Path $candidate) { return $candidate }
     } catch { }
@@ -204,6 +223,9 @@ try {
 
     # 로그인되지 않은 상태에서 'tailscale up'은 인증을 무기한 기다리므로 미리 확인한다. Stopped(끊김)는 정상이다.
     $state0 = Get-TsState
+    if ($state0 -eq '응답 없음') {
+        throw 'Tailscale이 20초 동안 응답하지 않습니다. 관리 창의 [Tailscale 다시 시작]이나 PC 재시작 뒤 다시 설치하세요.'
+    }
     if (@('Running', 'Stopped', 'Starting') -notcontains $state0) {
         throw "Tailscale 상태가 '$state0'입니다. Tailscale에 로그인한 뒤 다시 설치하세요."
     }
@@ -220,8 +242,18 @@ try {
             Where-Object { $_.Path -and ($_.Path -ieq (Join-Path $appDir $appExe)) }
         if ($running) { $running | Stop-Process -Force; Start-Sleep -Seconds 1; Write-Report '열려 있던 관리 창을 닫음 (업데이트)' }
         New-Item -ItemType Directory -Force -Path $appDir | Out-Null
-        foreach ($f in $appExe, 'install.ps1', 'uninstall.ps1', 'connect.ps1', 'update.ps1') {
+        $appFiles = @($appExe, 'install.ps1', 'uninstall.ps1', 'connect.ps1', 'update.ps1')
+        foreach ($f in $appFiles) {
             Copy-Item -LiteralPath (Join-Path $PSScriptRoot $f) -Destination $appDir -Force
+        }
+        # 이전 버전에만 있던 파일이 남지 않게 목록 밖의 파일은 지운다. 폴더(업데이트·설치 중인 임시 폴더 등)는 건드리지 않는다.
+        # Program Files 아래라 관리자만 파일을 만들 수 있으므로 링크를 따라갈 걱정은 없다.
+        Get-ChildItem -LiteralPath $appDir -File -Force | Where-Object { $appFiles -notcontains $_.Name } | ForEach-Object {
+            $old = $_
+            try {
+                Remove-Item -LiteralPath $old.FullName -Force -ErrorAction Stop
+                Write-Report "이전 버전 파일 정리: $($old.Name)"
+            } catch { Write-Report "이전 버전 파일을 지우지 못함: $($old.Name)" }
         }
         $wsh = New-Object -ComObject WScript.Shell
         $lnk = $wsh.CreateShortcut($shortcut)
