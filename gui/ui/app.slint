@@ -1,5 +1,13 @@
 import { Button, ComboBox, CheckBox, Palette } from "std-widgets.slint";
 
+// 최근 기록(connect.log) 한 줄. 시각은 따로 두어 내용이 여러 줄로 넘어가도 시각 열에 맞춰 들여 쓴다.
+export struct LogLine {
+    time: string,
+    text: string,
+    // 0 보통, 1 흐리게(--- 시작 ---), 2 경고(실패·오류·응답 없음 등)
+    tone: int,
+}
+
 // 랜딩 페이지와 같은 색 체계. 밝은/어두운 테마는 시스템 설정을 따른다.
 export global Theme {
     out property <bool> dark: Palette.color-scheme == ColorScheme.dark;
@@ -16,6 +24,23 @@ export global Theme {
     out property <color> screen: #0E161D;
     out property <color> screen-ink: #CFE3D8;
     out property <color> screen-dim: #6A857A;
+    out property <color> screen-warn: #F0B45A;
+}
+
+// 스크롤할 내용이 있을 때만 보이는 얇은 막대. 위치만 알려 주고, 스크롤은 마우스 휠로 한다.
+// Flickable 옆(같은 부모)에 두고 x를 정해 겹쳐 그린다.
+component ScrollThumb inherits Rectangle {
+    in property <length> view-height;
+    in property <length> content-height;
+    // Flickable.content-y (맨 위가 0, 아래로 내릴수록 음수)
+    in property <length> content-y;
+    property <length> inset: 4px;
+    property <length> track: root.view-height - 2 * root.inset;
+    visible: root.content-height > root.view-height + 1px;
+    width: 4px;
+    border-radius: 2px;
+    height: max(20px, root.track * (root.view-height / max(1px, root.content-height)));
+    y: root.inset + (root.track - root.height) * (-root.content-y / max(1px, root.content-height - root.view-height));
 }
 
 component Card inherits Rectangle {
@@ -40,6 +65,27 @@ component Led inherits Rectangle {
     background: tint;
     drop-shadow-blur: 14px;
     drop-shadow-color: tint.with-alpha(0.65);
+}
+
+// 줄바꿈되는 글. 레이아웃에 지금 너비에서 실제로 차지하는 높이를 알린다.
+// Slint 1.18은 가로 레이아웃·그리드 칸 안의 줄바꿈 Text 높이를 칸보다 넓은 너비로 재서 낮게 잡는다.
+// 그러면 화면 전체의 최소 높이가 실제보다 작아져, 창이 작을 때 아래쪽이 스크롤로도 보이지 않는다.
+component WrapText {
+    in property <string> text;
+    in property <color> color: Theme.ink;
+    in property <length> font-size: 12px;
+    in property <int> font-weight: 400;
+    height: label.preferred-height;
+    label := Text {
+        x: 0;
+        y: 0;
+        width: root.width;
+        text: root.text;
+        color: root.color;
+        font-size: root.font-size;
+        font-weight: root.font-weight;
+        wrap: word-wrap;
+    }
 }
 
 component Chip inherits Rectangle {
@@ -74,12 +120,10 @@ component Chip inherits Rectangle {
                 horizontal-stretch: 1;
             }
         }
-        Text {
+        WrapText {
             text: value;
-            color: Theme.ink;
             font-size: 13px;
             font-weight: 700;
-            wrap: word-wrap;
         }
     }
 }
@@ -161,14 +205,14 @@ export component AppWindow inherits Window {
     title: "Tailscale Force Connect";
     icon: @image-url("../assets/icon.png");
     preferred-width: 540px;
-    preferred-height: 770px;
+    preferred-height: 740px;
     min-width: 480px;
-    min-height: 660px;
+    min-height: 560px;
     background: Theme.bg;
     default-font-family: "Malgun Gothic";
     default-font-size: 14px;
 
-    in property <string> version: "1.7.0";
+    in property <string> version: "1.8.0";
     in property <bool> installed;
     // running | stuck(켜져 있지만 서버와 연결 안 됨) | stopped | login | missing | unknown
     in property <string> state: "unknown";
@@ -180,7 +224,7 @@ export component AppWindow inherits Window {
     in property <string> heal-text: "확인하는 중…";
     in property <bool> heal-on;
     in property <bool> fast-startup;
-    in property <[string]> log-lines;
+    in property <[LogLine]> log-lines;
     in property <[string]> reconnect-options: ["끄기", "30분", "1시간", "2시간", "4시간"];
     in-out property <int> reconnect-index: 2;
     in-out property <bool> run-test: false;
@@ -207,6 +251,15 @@ export component AppWindow inherits Window {
         if (self.force-light) {
             Palette.color-scheme = ColorScheme.light;
         }
+    }
+
+    // 최근 기록은 가장 최근 줄(맨 아래)이 보이게 둔다. 기록이 바뀌거나 칸 크기가 바뀌면 다시 맨 아래로.
+    // (관리 창은 기록이 실제로 바뀐 때만 log-lines를 새로 넣으므로, 위로 올려 읽는 동안 끌려 내려가지 않는다.)
+    function scroll-log-to-end() {
+        log-view.content-y = min(0px, log-view.height - log-view.content-height);
+    }
+    changed log-lines => {
+        root.scroll-log-to-end();
     }
 
     callback install();
@@ -244,411 +297,510 @@ export component AppWindow inherits Window {
         }
     }
 
-    VerticalLayout {
-        padding: 20px;
-        spacing: 14px;
+    // 창보다 내용이 길 때만(알림 배너가 여러 개 뜬 경우 등) 화면 전체를 세로로 스크롤한다. 가로로는 스크롤하지 않는다.
+    // 내용이 창에 들어가면 최근 기록 칸이 남는 높이를 채운다.
+    page-view := Flickable {
+        content-width: self.width;
 
-        // 머리글
-        HorizontalLayout {
-            spacing: 10px;
-            Image {
-                source: @image-url("../assets/icon.png");
-                width: 26px;
-                height: 26px;
-            }
-            VerticalLayout {
-                alignment: center;
-                Text {
-                    text: "Tailscale Force Connect";
-                    font-size: 15px;
-                    font-weight: 700;
-                    color: Theme.ink;
-                }
-            }
-            Rectangle {
-                horizontal-stretch: 1;
-            }
-            VerticalLayout {
-                alignment: center;
-                Text {
-                    text: root.update-status != "" ? root.update-status : version-link.hovered ? "눌러서 새 버전 확인" : "";
-                    color: Theme.muted;
-                    font-size: 12px;
-                }
-            }
-            VerticalLayout {
-                alignment: center;
-                version-link := LinkText {
-                    text: "v" + root.version;
-                    clicked => {
-                        root.check-update();
-                    }
-                }
-            }
-        }
+        VerticalLayout {
+            padding: 18px;
+            spacing: 12px;
 
-        // 새 버전 알림 (관리 창을 열 때 GitHub 최신 릴리스를 확인한다)
-        if root.update-available: Rectangle {
-            border-radius: 12px;
-            background: Theme.green.with-alpha(0.12);
-            border-width: 1px;
-            border-color: Theme.green.with-alpha(0.45);
+            // 머리글
             HorizontalLayout {
-                padding: 12px;
-                spacing: 12px;
+                vertical-stretch: 0;
+                spacing: 10px;
+                Image {
+                    source: @image-url("../assets/icon.png");
+                    width: 26px;
+                    height: 26px;
+                }
                 VerticalLayout {
                     alignment: center;
-                    spacing: 2px;
-                    horizontal-stretch: 1;
                     Text {
-                        text: "새 버전 v" + root.update-version;
+                        text: "Tailscale Force Connect";
+                        font-size: 15px;
                         font-weight: 700;
                         color: Theme.ink;
                     }
+                }
+                Rectangle {
+                    horizontal-stretch: 1;
+                }
+                VerticalLayout {
+                    alignment: center;
                     Text {
-                        text: "설정은 그대로 두고, 연결을 끊지 않고 업데이트합니다.";
+                        text: root.update-status != "" ? root.update-status : version-link.hovered ? "눌러서 새 버전 확인" : "";
                         color: Theme.muted;
                         font-size: 12px;
-                        wrap: word-wrap;
                     }
                 }
                 VerticalLayout {
                     alignment: center;
-                    PrimaryButton {
-                        text: "업데이트";
-                        enabled: !root.busy;
+                    version-link := LinkText {
+                        text: "v" + root.version;
                         clicked => {
-                            root.update();
+                            root.check-update();
                         }
                     }
                 }
             }
-        }
 
-        // 현재 상태
-        Card {
-            VerticalLayout {
-                padding: 20px;
-                spacing: 16px;
+            // 새 버전 알림 (관리 창을 열 때 GitHub 최신 릴리스를 확인한다)
+            if root.update-available: Rectangle {
+                vertical-stretch: 0;
+                border-radius: 12px;
+                background: Theme.green.with-alpha(0.12);
+                border-width: 1px;
+                border-color: Theme.green.with-alpha(0.45);
                 HorizontalLayout {
-                    spacing: 16px;
+                    padding: 12px;
+                    padding-left: 14px;
+                    spacing: 12px;
                     VerticalLayout {
                         alignment: center;
-                        Led {
-                            tint: root.state-color;
-                        }
-                    }
-                    VerticalLayout {
                         spacing: 2px;
-                        alignment: center;
+                        horizontal-stretch: 1;
                         Text {
-                            text: root.state-title;
-                            font-size: 26px;
-                            font-weight: 800;
+                            text: "새 버전 v" + root.update-version;
+                            font-weight: 700;
                             color: Theme.ink;
                         }
-                        Text {
-                            text: root.state-detail;
+                        WrapText {
+                            text: "설정은 그대로 두고, 연결을 끊지 않고 업데이트합니다.";
                             color: Theme.muted;
-                            font-size: 13px;
-                            wrap: word-wrap;
+                        }
+                    }
+                    VerticalLayout {
+                        alignment: center;
+                        PrimaryButton {
+                            text: "업데이트";
+                            enabled: !root.busy;
+                            clicked => {
+                                root.update();
+                            }
                         }
                     }
                 }
-                HorizontalLayout {
-                    spacing: 10px;
-                    Chip {
-                        label: "부팅할 때";
-                        value: root.boot-text;
-                        dot: root.installed ? Theme.green : Theme.grey;
+            }
+
+            // 현재 상태
+            Card {
+                vertical-stretch: 0;
+                VerticalLayout {
+                    padding: 18px;
+                    spacing: 14px;
+                    HorizontalLayout {
+                        spacing: 14px;
+                        VerticalLayout {
+                            alignment: center;
+                            Led {
+                                tint: root.state-color;
+                            }
+                        }
+                        VerticalLayout {
+                            spacing: 2px;
+                            alignment: center;
+                            Text {
+                                text: root.state-title;
+                                font-size: 24px;
+                                font-weight: 800;
+                                color: Theme.ink;
+                            }
+                            WrapText {
+                                text: root.state-detail;
+                                color: Theme.muted;
+                                font-size: 13px;
+                            }
+                        }
                     }
-                    Chip {
-                        label: "직접 끊으면";
-                        value: root.reconnect-text;
-                        dot: root.reconnect-on ? Theme.green : Theme.grey;
-                    }
-                    Chip {
-                        label: "멈추면";
-                        value: root.heal-text;
-                        dot: root.heal-on ? Theme.green : Theme.grey;
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Chip {
+                            label: "부팅할 때";
+                            value: root.boot-text;
+                            dot: root.installed ? Theme.green : Theme.grey;
+                        }
+                        Chip {
+                            label: "직접 끊으면";
+                            value: root.reconnect-text;
+                            dot: root.reconnect-on ? Theme.green : Theme.grey;
+                        }
+                        Chip {
+                            label: "멈추면";
+                            value: root.heal-text;
+                            dot: root.heal-on ? Theme.green : Theme.grey;
+                        }
                     }
                 }
             }
-        }
 
-        // 설치된 경우: 자동 재연결 설정
-        if root.installed: Card {
-            VerticalLayout {
-                padding: 18px;
-                spacing: 10px;
-                HorizontalLayout {
+            // 설치된 경우: 자동 재연결 설정과 문제 해결 버튼
+            if root.installed: Card {
+                vertical-stretch: 0;
+                VerticalLayout {
+                    padding: 16px;
                     spacing: 10px;
-                    VerticalLayout {
-                        alignment: center;
-                        horizontal-stretch: 1;
-                        SectionTitle {
-                            text: "직접 끊은 뒤 자동 재연결";
+                    HorizontalLayout {
+                        spacing: 10px;
+                        VerticalLayout {
+                            alignment: center;
+                            horizontal-stretch: 1;
+                            SectionTitle {
+                                text: "직접 끊은 뒤 자동 재연결";
+                            }
+                        }
+                        CheckBox {
+                            text: "Windows 알림";
+                            checked <=> root.notify-on;
+                            toggled => {
+                                root.notify-toggled(self.checked);
+                            }
+                        }
+                    }
+                    WrapText {
+                        text: "트레이에서 Disconnect를 눌러도 이 시간이 지나면 다시 연결합니다. 1분마다 확인하므로 몇 분 늦을 수 있고, 끊기거나 다시 연결되면 Windows 알림으로 알려 드립니다.";
+                        color: Theme.muted;
+                    }
+                    HorizontalLayout {
+                        spacing: 10px;
+                        ComboBox {
+                            model: root.reconnect-options;
+                            current-index <=> root.reconnect-index;
+                            enabled: !root.busy;
+                            horizontal-stretch: 1;
+                        }
+                        PrimaryButton {
+                            text: "적용";
+                            enabled: !root.busy;
+                            clicked => {
+                                root.apply-reconnect();
+                            }
+                        }
+                    }
+                    Rectangle {
+                        height: 1px;
+                        background: Theme.card-border;
+                    }
+                    // 버튼 너비를 맞춰 설명이 같은 자리에서 시작하게 한다.
+                    GridLayout {
+                        spacing-horizontal: 12px;
+                        spacing-vertical: 8px;
+                        Row {
+                            VerticalLayout {
+                                alignment: center;
+                                horizontal-stretch: 0;
+                                Button {
+                                    text: "동작 확인";
+                                    enabled: !root.busy;
+                                    clicked => {
+                                        root.verify();
+                                    }
+                                }
+                            }
+                            VerticalLayout {
+                                alignment: center;
+                                horizontal-stretch: 1;
+                                WrapText {
+                                    text: "연결을 몇 초 끊었다가 다시 연결되는지 봅니다. 원격으로 접속한 것 같으면 한 번 더 묻습니다.";
+                                    color: Theme.muted;
+                                }
+                            }
+                        }
+                        Row {
+                            VerticalLayout {
+                                alignment: center;
+                                horizontal-stretch: 0;
+                                Button {
+                                    text: "Tailscale 다시 시작";
+                                    enabled: !root.busy;
+                                    clicked => {
+                                        root.restart-tailscale();
+                                    }
+                                }
+                            }
+                            VerticalLayout {
+                                alignment: center;
+                                horizontal-stretch: 1;
+                                WrapText {
+                                    text: "트레이는 정상인데 다른 기기에서 접속이 안 될 때 누르세요. 연결이 잠깐 끊깁니다.";
+                                    color: Theme.muted;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 설치되지 않은 경우: 설치
+            if !root.installed: Card {
+                vertical-stretch: 0;
+                VerticalLayout {
+                    padding: 16px;
+                    spacing: 10px;
+                    SectionTitle {
+                        text: "설치";
+                    }
+                    WrapText {
+                        text: "부팅할 때마다 Tailscale을 다시 연결하는 예약 작업을 등록합니다. 관리자 권한(UAC)이 한 번 필요합니다.";
+                        color: Theme.muted;
+                    }
+                    HorizontalLayout {
+                        spacing: 10px;
+                        VerticalLayout {
+                            alignment: center;
+                            Text {
+                                text: "직접 끊으면 다시 연결까지";
+                                color: Theme.ink;
+                                font-size: 13px;
+                            }
+                        }
+                        ComboBox {
+                            model: root.reconnect-options;
+                            current-index <=> root.reconnect-index;
+                            enabled: !root.busy;
+                            horizontal-stretch: 1;
                         }
                     }
                     CheckBox {
-                        text: "Windows 알림";
-                        checked <=> root.notify-on;
-                        toggled => {
-                            root.notify-toggled(self.checked);
-                        }
-                    }
-                }
-                Text {
-                    text: "트레이에서 Disconnect를 눌러도 이 시간이 지나면 다시 연결합니다(주기적으로 확인하므로 몇 분 늦을 수 있음). 연결 상태는 1분마다 확인해서, 끊기거나 다시 연결되면 Windows 알림으로 알려 드립니다.";
-                    color: Theme.muted;
-                    font-size: 13px;
-                    wrap: word-wrap;
-                }
-                HorizontalLayout {
-                    spacing: 10px;
-                    ComboBox {
-                        model: root.reconnect-options;
-                        current-index <=> root.reconnect-index;
+                        text: "설치 후 동작 확인 (연결이 몇 초 끊김 · 원격 접속 중이면 끄세요)";
+                        checked <=> root.run-test;
                         enabled: !root.busy;
-                        horizontal-stretch: 1;
                     }
                     PrimaryButton {
-                        text: "적용";
-                        enabled: !root.busy;
+                        text: "설치하기";
+                        enabled: !root.busy && root.state != "missing";
                         clicked => {
-                            root.apply-reconnect();
-                        }
-                    }
-                }
-                HorizontalLayout {
-                    spacing: 10px;
-                    Button {
-                        text: "동작 확인";
-                        enabled: !root.busy;
-                        clicked => {
-                            root.verify();
-                        }
-                    }
-                    VerticalLayout {
-                        alignment: center;
-                        Text {
-                            text: "연결을 몇 초 끊었다가 다시 연결되는지 봅니다. 원격으로 접속한 것 같으면 한 번 더 묻습니다.";
-                            color: Theme.muted;
-                            font-size: 12px;
-                            wrap: word-wrap;
-                        }
-                    }
-                }
-                HorizontalLayout {
-                    spacing: 10px;
-                    Button {
-                        text: "Tailscale 다시 시작";
-                        enabled: !root.busy;
-                        clicked => {
-                            root.restart-tailscale();
-                        }
-                    }
-                    VerticalLayout {
-                        alignment: center;
-                        Text {
-                            text: "트레이는 정상인데 다른 기기에서 접속이 안 될 때 누르세요. 연결이 잠깐 끊깁니다.";
-                            color: Theme.muted;
-                            font-size: 12px;
-                            wrap: word-wrap;
+                            root.install();
                         }
                     }
                 }
             }
-        }
 
-        // 설치되지 않은 경우: 설치
-        if !root.installed: Card {
-            VerticalLayout {
-                padding: 18px;
-                spacing: 12px;
-                SectionTitle {
-                    text: "설치";
-                }
-                Text {
-                    text: "부팅할 때마다 Tailscale을 다시 연결하는 예약 작업을 등록합니다. 관리자 권한(UAC)이 한 번 필요합니다.";
-                    color: Theme.muted;
-                    font-size: 13px;
-                    wrap: word-wrap;
-                }
+            // 빠른 시작 경고
+            if root.fast-startup: Rectangle {
+                vertical-stretch: 0;
+                border-radius: 12px;
+                background: Theme.amber.with-alpha(0.13);
+                border-width: 1px;
+                border-color: Theme.amber.with-alpha(0.45);
                 HorizontalLayout {
+                    padding: 12px;
+                    padding-left: 14px;
                     spacing: 10px;
                     VerticalLayout {
-                        alignment: center;
-                        Text {
-                            text: "직접 끊으면 다시 연결까지";
-                            color: Theme.ink;
-                            font-size: 13px;
+                        alignment: start;
+                        padding-top: 5px;
+                        Rectangle {
+                            width: 8px;
+                            height: 8px;
+                            border-radius: 4px;
+                            background: Theme.amber;
                         }
                     }
-                    ComboBox {
-                        model: root.reconnect-options;
-                        current-index <=> root.reconnect-index;
-                        enabled: !root.busy;
+                    WrapText {
+                        text: "Windows 빠른 시작이 켜져 있습니다. '종료 후 전원 켜기'에서는 부팅 시 연결이 실행되지 않습니다(재시작·정전 뒤에는 동작). 제어판 > 전원 옵션에서 끌 수 있습니다.";
                         horizontal-stretch: 1;
                     }
                 }
-                CheckBox {
-                    text: "설치 후 동작 확인 (연결이 몇 초 끊김 · 원격 접속 중이면 끄세요)";
-                    checked <=> root.run-test;
-                    enabled: !root.busy;
-                }
-                PrimaryButton {
-                    text: "설치하기";
-                    enabled: !root.busy && root.state != "missing";
-                    clicked => {
-                        root.install();
-                    }
-                }
             }
-        }
 
-        // 빠른 시작 경고
-        if root.fast-startup: Rectangle {
-            border-radius: 12px;
-            background: Theme.amber.with-alpha(0.13);
-            border-width: 1px;
-            border-color: Theme.amber.with-alpha(0.45);
-            HorizontalLayout {
-                padding: 12px;
-                spacing: 10px;
+            // 마지막 작업 결과. 스크립트 출력이 길면 이 안에서만 스크롤한다.
+            if root.result-visible: Rectangle {
+                vertical-stretch: 0;
+                border-radius: 12px;
+                background: (root.result-ok ? Theme.green : Theme.red).with-alpha(0.12);
+                border-width: 1px;
+                border-color: (root.result-ok ? Theme.green : Theme.red).with-alpha(0.45);
                 VerticalLayout {
-                    alignment: start;
+                    padding: 12px;
+                    padding-left: 14px;
+                    spacing: 6px;
+                    HorizontalLayout {
+                        spacing: 10px;
+                        WrapText {
+                            text: root.result-title;
+                            font-size: 14px;
+                            font-weight: 700;
+                            horizontal-stretch: 1;
+                        }
+                        LinkText {
+                            text: "닫기";
+                            clicked => {
+                                root.dismiss-result();
+                            }
+                        }
+                    }
                     Rectangle {
-                        width: 8px;
-                        height: 8px;
-                        border-radius: 4px;
-                        background: Theme.amber;
-                    }
-                }
-                Text {
-                    text: "Windows 빠른 시작이 켜져 있습니다. '종료 후 전원 켜기'에서는 부팅 시 연결이 실행되지 않습니다(재시작·정전 뒤에는 동작). 제어판 > 전원 옵션에서 끌 수 있습니다.";
-                    color: Theme.ink;
-                    font-size: 12px;
-                    wrap: word-wrap;
-                    horizontal-stretch: 1;
-                }
-            }
-        }
-
-        // 마지막 작업 결과
-        if root.result-visible: Rectangle {
-            border-radius: 12px;
-            background: (root.result-ok ? Theme.green : Theme.red).with-alpha(0.12);
-            border-width: 1px;
-            border-color: (root.result-ok ? Theme.green : Theme.red).with-alpha(0.45);
-            VerticalLayout {
-                padding: 14px;
-                spacing: 6px;
-                HorizontalLayout {
-                    Text {
-                        text: root.result-title;
-                        font-weight: 700;
-                        color: Theme.ink;
-                        horizontal-stretch: 1;
-                    }
-                    LinkText {
-                        text: "닫기";
-                        clicked => {
-                            root.dismiss-result();
+                        height: min(result-body.preferred-height, 120px);
+                        result-view := Flickable {
+                            x: 0;
+                            y: 0;
+                            width: parent.width;
+                            height: parent.height;
+                            content-width: self.width;
+                            result-body := VerticalLayout {
+                                padding-right: 10px;
+                                WrapText {
+                                    text: root.result-text;
+                                }
+                            }
+                        }
+                        ScrollThumb {
+                            x: parent.width - self.width;
+                            view-height: result-view.height;
+                            content-height: result-view.content-height;
+                            content-y: result-view.content-y;
+                            background: Theme.muted.with-alpha(0.5);
                         }
                     }
                 }
-                Text {
-                    text: root.result-text;
-                    color: Theme.ink;
-                    font-size: 12px;
-                    wrap: word-wrap;
+            }
+
+            // 최근 기록 (connect.log). 줄이 많아도 칸 밖으로 넘치지 않고 이 안에서 스크롤한다.
+            Card {
+                vertical-stretch: 1;
+                min-height: 120px;
+                VerticalLayout {
+                    padding: 16px;
+                    padding-top: 14px;
+                    spacing: 10px;
+                    HorizontalLayout {
+                        SectionTitle {
+                            text: "최근 기록";
+                            horizontal-stretch: 1;
+                        }
+                        LinkText {
+                            text: "로그 폴더 열기";
+                            clicked => {
+                                root.open-logs();
+                            }
+                        }
+                    }
+                    Rectangle {
+                        background: Theme.screen;
+                        border-radius: 10px;
+                        clip: true;
+                        vertical-stretch: 1;
+                        // x·y를 직접 정해 두면 줄 수가 이 칸(과 창)의 최소 높이를 밀어 올리지 않는다.
+                        log-view := Flickable {
+                            x: 0;
+                            y: 0;
+                            width: parent.width;
+                            height: parent.height;
+                            content-width: self.width;
+                            changed height => {
+                                root.scroll-log-to-end();
+                            }
+                            changed content-height => {
+                                root.scroll-log-to-end();
+                            }
+                            VerticalLayout {
+                                padding: 12px;
+                                padding-right: 16px;
+                                spacing: 4px;
+                                alignment: end;
+                                // 시각과 내용을 레이아웃 없이 직접 놓고, 줄 높이는 내용이 실제 너비에서 차지하는 높이로 정한다.
+                                // (HorizontalLayout으로 묶으면 줄바꿈된 내용의 높이를 줄 전체 너비 기준으로 계산해 낮게 잡는다.)
+                                for line in root.log-lines: Rectangle {
+                                    height: log-text.preferred-height;
+                                    log-time := Text {
+                                        x: 0;
+                                        y: 0;
+                                        text: line.time;
+                                        color: Theme.screen-dim;
+                                        font-family: "Consolas";
+                                        font-size: 12px;
+                                    }
+                                    log-text := Text {
+                                        x: line.time == "" ? 0px : log-time.preferred-width + 10px;
+                                        y: 0;
+                                        width: parent.width - self.x;
+                                        text: line.text;
+                                        color: line.tone == 2 ? Theme.screen-warn : line.tone == 1 ? Theme.screen-dim : Theme.screen-ink;
+                                        font-family: "Consolas";
+                                        font-size: 12px;
+                                        wrap: word-wrap;
+                                    }
+                                }
+                            }
+                        }
+                        // 위로 가려진 줄이 있으면 위쪽 끝을 흐리게 해 기록이 위로 이어진다는 것을 보여 준다.
+                        if log-view.content-y < -1px: Rectangle {
+                            x: 0;
+                            y: 0;
+                            width: parent.width;
+                            height: 18px;
+                            background: @linear-gradient(180deg, Theme.screen 0%, Theme.screen.with-alpha(0) 100%);
+                        }
+                        if root.log-lines.length == 0: Text {
+                            x: 0;
+                            y: 0;
+                            width: parent.width;
+                            height: parent.height;
+                            text: "아직 기록이 없습니다.";
+                            color: Theme.screen-dim;
+                            font-size: 12px;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                        ScrollThumb {
+                            x: parent.width - self.width - 4px;
+                            view-height: log-view.height;
+                            content-height: log-view.content-height;
+                            content-y: log-view.content-y;
+                            background: Theme.screen-dim;
+                        }
+                    }
                 }
             }
-        }
 
-        // 최근 기록 (connect.log)
-        Card {
-            vertical-stretch: 1;
-            min-height: 100px;
-            VerticalLayout {
-                padding: 16px;
-                spacing: 10px;
-                HorizontalLayout {
-                    SectionTitle {
-                        text: "최근 기록";
-                        horizontal-stretch: 1;
-                    }
-                    LinkText {
-                        text: "로그 폴더 열기";
-                        clicked => {
-                            root.open-logs();
+            // 바닥글
+            HorizontalLayout {
+                vertical-stretch: 0;
+                spacing: 14px;
+                if root.installed: Button {
+                    text: root.confirm-uninstall ? "한 번 더 누르면 제거합니다" : "제거";
+                    enabled: !root.busy;
+                    clicked => {
+                        if (root.confirm-uninstall) {
+                            root.confirm-uninstall = false;
+                            root.uninstall();
+                        } else {
+                            root.confirm-uninstall = true;
                         }
                     }
                 }
                 Rectangle {
-                    background: Theme.screen;
-                    border-radius: 10px;
-                    clip: true;
-                    vertical-stretch: 1;
-                    VerticalLayout {
-                        padding: 12px;
-                        spacing: 3px;
-                        alignment: end;
-                        if root.log-lines.length == 0: Text {
-                            text: "아직 기록이 없습니다.";
-                            color: Theme.screen-dim;
-                            font-size: 12px;
+                    horizontal-stretch: 1;
+                }
+                VerticalLayout {
+                    alignment: center;
+                    LinkText {
+                        text: "GitHub";
+                        clicked => {
+                            root.open-url("https://github.com/jeiel85/tailscale-force-connect");
                         }
-                        for line in root.log-lines: Text {
-                            text: line;
-                            color: Theme.screen-ink;
-                            font-family: "Consolas";
-                            font-size: 12px;
-                            wrap: word-wrap;
+                    }
+                }
+                VerticalLayout {
+                    alignment: center;
+                    LinkText {
+                        text: "Made with Slint";
+                        clicked => {
+                            root.open-url("https://slint.dev");
                         }
                     }
                 }
             }
         }
-
-        // 바닥글
-        HorizontalLayout {
-            spacing: 14px;
-            if root.installed: Button {
-                text: root.confirm-uninstall ? "한 번 더 누르면 제거합니다" : "제거";
-                enabled: !root.busy;
-                clicked => {
-                    if (root.confirm-uninstall) {
-                        root.confirm-uninstall = false;
-                        root.uninstall();
-                    } else {
-                        root.confirm-uninstall = true;
-                    }
-                }
-            }
-            Rectangle {
-                horizontal-stretch: 1;
-            }
-            VerticalLayout {
-                alignment: center;
-                LinkText {
-                    text: "GitHub";
-                    clicked => {
-                        root.open-url("https://github.com/jeiel85/tailscale-force-connect");
-                    }
-                }
-            }
-            VerticalLayout {
-                alignment: center;
-                LinkText {
-                    text: "Made with Slint";
-                    clicked => {
-                        root.open-url("https://slint.dev");
-                    }
-                }
-            }
-        }
+    }
+    ScrollThumb {
+        x: parent.width - self.width - 3px;
+        view-height: page-view.height;
+        content-height: page-view.content-height;
+        content-y: page-view.content-y;
+        background: Theme.muted.with-alpha(0.6);
     }
 
     // 새 버전을 찾으면 띄우는 알림 창. [나중에]를 누르면 위쪽 초록 알림만 남는다.
