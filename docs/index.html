@@ -329,7 +329,8 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1</code></pre><button type=
         <div><dt>예약 작업</dt><dd><code>Tailscale Auto Connect</code>: 부팅하고 20초 뒤 SYSTEM으로 실행합니다. 연결될 때까지 10초 간격으로 최대 10분 동안 <code>tailscale up</code>을 시도합니다.</dd></div>
         <div><dt>스크립트 폴더</dt><dd><code>C:\ProgramData\TailscaleAutoConnect\</code>: 관리자만 고칠 수 있고, 일반 사용자는 읽기만 할 수 있습니다.</dd></div>
         <div><dt>로그</dt><dd>같은 폴더의 <code>connect.log</code>와 이벤트 뷰어의 응용 프로그램 로그(원본 <code>TailscaleForceConnect</code>)에 부팅할 때마다 결과가 남습니다. 연결 실패나 로그인이 필요한 상황(키 만료)은 오류로 기록됩니다.</dd></div>
-        <div><dt>자동 재연결 작업</dt><dd><code>Tailscale Auto Reconnect</code>: SYSTEM으로 5분마다 상태를 확인해, 직접 끊은 상태가 1시간 넘게 이어지면 다시 연결합니다. 트레이 메뉴로 끊었든 명령으로 끊었든 똑같습니다. 시간은 <code>install.cmd -ReconnectAfter 30m</code>이나 한 줄 설치 앞의 <code>set TFC_RECONNECT_AFTER=30m &amp;&amp;</code>로 바꾸고, <code>0</code>이면 이 작업을 만들지 않습니다.</dd></div>
+        <div><dt>감시 작업</dt><dd><code>Tailscale Auto Reconnect</code>: SYSTEM으로 1분마다 상태를 확인합니다. 직접 끊은 상태가 1시간 넘게 이어지면 다시 연결합니다. 트레이 메뉴로 끊었든 명령으로 끊었든 똑같습니다. 시간은 <code>install.cmd -ReconnectAfter 30m</code>이나 한 줄 설치 앞의 <code>set TFC_RECONNECT_AFTER=30m &amp;&amp;</code>로 바꾸고, <code>0</code>이면 끕니다.</dd></div>
+        <div><dt>멈춤 감시</dt><dd>같은 작업이, 트레이는 '연결됨'인데 실제로는 서버와 연결되지 않은 상태(절전에서 깨어난 뒤 등)가 인터넷이 되는데도 3분 넘게 이어지면 Tailscale 서비스를 다시 시작하고 Windows 알림으로 알립니다. 풀리지 않으면 30분 뒤 다시 시도합니다. 시간은 <code>install.cmd -HealAfter 10m</code>이나 <code>set TFC_HEAL_AFTER=10m &amp;&amp;</code>로 바꾸고, <code>0</code>이면 끕니다.</dd></div>
         <div><dt>Unattended 모드</dt><dd>꺼져 있으면 켭니다. 그래야 Windows에 로그인하기 전에도 연결됩니다.</dd></div>
         <div><dt>기존 설정</dt><dd>플래그 없이 <code>tailscale up</code>만 실행하므로 exit node, 경로 수락 같은 설정은 바뀌지 않습니다.</dd></div>
       </dl>

@@ -11,6 +11,10 @@
 #   cmd:        set TFC_RECONNECT_AFTER=30m && powershell -c "irm https://jeiel85.github.io/tailscale-force-connect/get.ps1 | iex"
 #   PowerShell: $env:TFC_RECONNECT_AFTER='30m'; irm https://jeiel85.github.io/tailscale-force-connect/get.ps1 | iex
 #
+# Change how long Tailscale may look connected but stay offline before its service is restarted (default 3m, 0 = off):
+#   cmd:        set TFC_HEAL_AFTER=10m && powershell -c "irm https://jeiel85.github.io/tailscale-force-connect/get.ps1 | iex"
+#   PowerShell: $env:TFC_HEAL_AFTER='10m'; irm https://jeiel85.github.io/tailscale-force-connect/get.ps1 | iex
+#
 # Downloads the latest release zip from GitHub, extracts it to a temp folder,
 # runs install.ps1 (which asks for administrator rights and installs the management window
 # to Program Files first), opens that window, then deletes the temp folder.
@@ -48,6 +52,10 @@ function Invoke-TailscaleForceConnectInstall {
         if ($env:TFC_RECONNECT_AFTER) {
             $installArgs += @('-ReconnectAfter', $env:TFC_RECONNECT_AFTER.Trim())
             Write-Host "TFC_RECONNECT_AFTER is set: reconnect after $($env:TFC_RECONNECT_AFTER.Trim())."
+        }
+        if ($env:TFC_HEAL_AFTER) {
+            $installArgs += @('-HealAfter', $env:TFC_HEAL_AFTER.Trim())
+            Write-Host "TFC_HEAL_AFTER is set: restart a stuck Tailscale after $($env:TFC_HEAL_AFTER.Trim())."
         }
         Write-Host 'Running install.ps1 (a UAC prompt will appear)...'
         & powershell.exe @installArgs
