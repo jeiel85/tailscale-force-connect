@@ -15,7 +15,7 @@ use std::{
     time::{Duration, Instant, SystemTime},
 };
 
-use slint::{ComponentHandle, ModelRc, SharedString, Timer, TimerMode, VecModel};
+use slint::{ComponentHandle, Model, ModelRc, SharedString, Timer, TimerMode, VecModel};
 
 slint::include_modules!();
 
@@ -28,8 +28,8 @@ const UPDATE_CHECK_TIMEOUT: Duration = Duration::from_secs(45);
 /// 알림 한 번(PowerShell)을 기다리는 최대 시간. 알림 작업은 1분 제한이라
 /// 상태 조회(10초) + 알림 두 번(멈춤 복구, 끊김)이 그 안에 끝나도록 짧게 둔다.
 const TOAST_TIMEOUT: Duration = Duration::from_secs(20);
-/// 최근 기록 줄 수. 버튼 줄이 늘어 창 높이에 맞춰 줄였다(9 → 7). 전체 기록은 [로그 폴더 열기]로 본다.
-const LOG_LINES: usize = 7;
+/// 최근 기록 줄 수. 칸 안에서 스크롤되므로 창 높이와 상관없다. 전체 기록은 [로그 폴더 열기]로 본다.
+const LOG_LINES: usize = 40;
 
 /// 콤보 상자 항목 순서와 같다: (install.ps1 -ReconnectAfter 값, 분)
 const RECONNECT: [(&str, i64); 5] = [("0", 0), ("30m", 30), ("1h", 60), ("2h", 120), ("4h", 240)];
@@ -103,7 +103,8 @@ struct Snapshot {
     state: &'static str,
     title: String,
     detail: String,
-    log: Vec<String>,
+    /// (시각 "MM-DD HH:MM", 내용)
+    log: Vec<(String, String)>,
     fast_startup: bool,
     active_peers: Vec<String>,
 }
@@ -574,8 +575,16 @@ fn apply_snapshot(ui: &AppWindow, s: &Snapshot, state: &UiState) {
         ui.set_reconnect_index(i as i32);
     }
 
-    let lines: Vec<SharedString> = s.log.iter().map(|l| SharedString::from(l.as_str())).collect();
-    ui.set_log_lines(ModelRc::new(VecModel::from(lines)));
+    // 같은 기록을 다시 넣으면 화면이 맨 아래로 돌아가므로(위로 올려 읽는 중일 수 있다), 바뀐 때만 넣는다.
+    let lines: Vec<LogLine> = s
+        .log
+        .iter()
+        .map(|(time, text)| LogLine { time: time.into(), text: text.into(), tone: log_tone(text) })
+        .collect();
+    let current = ui.get_log_lines();
+    if current.row_count() != lines.len() || current.iter().zip(&lines).any(|(a, b)| a != *b) {
+        ui.set_log_lines(ModelRc::new(VecModel::from(lines)));
+    }
 }
 
 fn minutes_label(m: i64) -> String {
@@ -750,22 +759,34 @@ fn stopped_for_minutes() -> Option<i64> {
     Some((elapsed.as_secs() / 60) as i64)
 }
 
-fn read_log_tail(path: &Path) -> Vec<String> {
+fn read_log_tail(path: &Path) -> Vec<(String, String)> {
     let Ok(text) = std::fs::read_to_string(path) else { return Vec::new() };
     let lines: Vec<&str> = text.trim_start_matches('\u{feff}').lines().filter(|l| !l.trim().is_empty()).collect();
     let start = lines.len().saturating_sub(LOG_LINES);
-    lines[start..]
-        .iter()
-        .map(|l| {
-            // "2026-11-11 23:50:28  내용" → "11-11 23:50  내용"
-            let l = l.trim_end();
-            if l.len() > 19 && l.as_bytes()[4] == b'-' && l.is_char_boundary(5) && l.is_char_boundary(16) && l.is_char_boundary(19) {
-                format!("{}{}", &l[5..16], &l[19..])
-            } else {
-                l.to_string()
-            }
-        })
-        .collect()
+    lines[start..].iter().map(|l| split_log_line(l.trim_end())).collect()
+}
+
+/// "2026-11-11 23:50:28  내용" → ("11-11 23:50", "내용"). 형식이 다르면 시각 없이 그대로.
+fn split_log_line(l: &str) -> (String, String) {
+    if l.len() > 19 && l.as_bytes()[4] == b'-' && l.is_char_boundary(5) && l.is_char_boundary(16) && l.is_char_boundary(19) {
+        (l[5..16].to_string(), l[19..].trim_start().to_string())
+    } else {
+        (String::new(), l.to_string())
+    }
+}
+
+/// 최근 기록 줄의 색: 0 보통, 1 흐리게(실행 시작 표시), 2 경고.
+/// connect.ps1이 남기는 실패·오류·멈춤 문구(…실패, 오류:, …하지 못함, 로그인이 필요함, 시간 초과, 응답 없음, …되지 않음)를 경고로 본다.
+/// "원인 -> 결과" 줄은 결과만 본다(원인에 '응답 없음'이 있어도 다시 시작해 연결됐으면 보통).
+fn log_tone(text: &str) -> i32 {
+    let outcome = text.rsplit("->").next().unwrap_or(text);
+    if text.starts_with("---") {
+        1
+    } else if ["실패", "오류", "못함", "필요함", "초과", "응답 없음", "되지 않음"].iter().any(|w| outcome.contains(w)) {
+        2
+    } else {
+        0
+    }
 }
 
 fn fast_startup_enabled() -> bool {
@@ -1323,6 +1344,26 @@ mod tests {
         assert!(status.success());
         assert_eq!(String::from_utf8_lossy(&out).trim(), "hello");
         assert!(matches!(run_with_timeout(&mut Command::new("no-such-program-xyz.exe"), Duration::from_secs(1)), Err(RunError::Spawn)));
+    }
+
+    #[test]
+    fn log_line_split_and_tone() {
+        assert_eq!(split_log_line("2026-11-16 17:18:05  연결됨 (시도 1)"), ("11-16 17:18".into(), "연결됨 (시도 1)".into()));
+        assert_eq!(split_log_line("형식이 다른 줄"), (String::new(), "형식이 다른 줄".into()));
+        assert_eq!(log_tone("--- 시작 ---"), 1);
+        assert_eq!(log_tone("연결됨 (시도 1)"), 0);
+        assert_eq!(log_tone("복구: 직접 요청 -> 서비스를 다시 시작해 12 초 만에 연결됨"), 0);
+        assert_eq!(log_tone("직접 끊은 지 60 분이 지나 다시 연결함"), 0);
+        assert_eq!(log_tone("복구: 직접 요청 -> 서비스를 다시 시작함 (직접 끊긴 상태라 연결은 하지 않음)"), 0);
+        assert_eq!(log_tone("감시: 끊긴 상태 확인 - 60 분 뒤에도 끊겨 있으면 다시 연결"), 0);
+        assert_eq!(log_tone("감시: 멈춘 상태가 2 분째 이어짐 - tailscale status가 20 초 동안 응답 없음. 3 분이 되면 Tailscale 서비스를 다시 시작"), 2);
+        assert_eq!(log_tone("실패: 10분 동안 5 회 시도했지만 연결되지 않음 (마지막 상태 'Stopped')"), 2);
+        assert_eq!(log_tone("로그인이 필요함(키 만료 등) - 자동 연결 불가"), 2);
+        assert_eq!(log_tone("tailscale up 시간 초과"), 2);
+        assert_eq!(log_tone("오류: 액세스가 거부되었습니다"), 2);
+        assert_eq!(log_tone("복구: 3 분 동안 멈춤: tailscale status가 20 초 동안 응답 없음 -> 서비스를 다시 시작해 14 초 만에 연결됨"), 0);
+        assert_eq!(log_tone("복구 실패: 직접 요청 -> 서비스를 다시 시작했지만 30 초 안에 연결되지 않음 (상태 'Stopped')"), 2);
+        assert_eq!(log_tone("복구: 직접 요청 -> 서비스를 다시 시작했지만 로그인이 필요함(키 만료 등)"), 2);
     }
 
     #[test]
