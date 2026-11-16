@@ -25,6 +25,7 @@ $statusWait  = 20000                       # tailscale status 한 번에 기다�
 $stuckFile   = Join-Path $PSScriptRoot 'stuck-since.json'   # 멈춘 상태를 처음 본 시각(since)과 마지막으로 본 시각(last)
 $healFile    = Join-Path $PSScriptRoot 'heal-last.json'     # 마지막 서비스 재시작 결과. 관리 창과 알림이 읽는다
 $healCooldownMinutes = 30    # 재시작해도 풀리지 않는 경우(방화벽 등) 계속 재시작하지 않도록 쉬는 시간
+$healOkCooldownMinutes = 10  # 재시작으로 풀린 뒤 다시 멈췄을 때 쉬는 시간
 $maxGapSeconds = 420         # 마지막 확인 뒤 이만큼 비었으면(절전·꺼짐) 멈춘 시간을 새로 센다. 감시 주기(1~5분)보다 길어야 한다
 $controlHost = 'controlplane.tailscale.com'
 
@@ -94,7 +95,13 @@ function Get-BackendState {
 # 운영체제 쪽에서 Tailscale 조정 서버까지 TCP 연결이 되는지 본다(5초 제한).
 # 되는데도 Tailscale이 연결되지 않았다면 Tailscale 쪽이 멈춘 것이다. 안 되면 진짜 네트워크 문제라 재시작해도 소용없다.
 function Test-ControlReachable {
-    $client = New-Object Net.Sockets.TcpClient
+    # 인자 없는 TcpClient는 IPv4 전용이라, IPv6만 되는 망에서도 닿도록 듀얼 모드 소켓을 쓴다(IPv6가 꺼져 있으면 IPv4로).
+    try {
+        $client = New-Object Net.Sockets.TcpClient([Net.Sockets.AddressFamily]::InterNetworkV6)
+        $client.Client.DualMode = $true
+    } catch {
+        $client = New-Object Net.Sockets.TcpClient
+    }
     try {
         $task = $client.ConnectAsync($controlHost, 443)
         return ($task.Wait(5000) -and $client.Connected)
@@ -109,6 +116,13 @@ function Test-ControlReachable {
 #   $ServiceStatus: 서비스 상태('Running', 'Stopped' 등, 서비스가 없으면 $null), $StartType: 시작 유형('Automatic', 'Disabled' 등)
 #   $StatusResult: Get-TsStatus 결과, $Reachable: 조정 서버에 닿는지 확인하는 스크립트 블록(필요할 때만 부른다)
 # 결과 Kind: healthy(정상) / stopped(직접 끊음) / stuck(멈춤) / network(진짜 네트워크 끊김) / ignore(재시작으로 풀 수 없음)
+# Self.Online(조정 서버와 연결돼 있는지). 값이 없으면(이 값을 채우지 않는 Tailscale) 연결된 것으로 본다(관리 창과 같은 기준).
+# 없는 값을 '오프라인'으로 보면 그런 버전에서 30분마다 서비스를 재시작하게 된다.
+function Test-SelfOnline($Status) {
+    if (-not $Status.Self -or -not $Status.Self.PSObject.Properties['Online']) { return $true }
+    return [bool]$Status.Self.Online
+}
+
 function Get-WatchVerdict($ServiceStatus, $StartType, $StatusResult, [scriptblock]$Reachable) {
     if ($ServiceStatus -ne 'Running') {
         # 서비스를 일부러 '사용 안 함'으로 둔 경우는 건드리지 않는다.
@@ -122,7 +136,7 @@ function Get-WatchVerdict($ServiceStatus, $StartType, $StatusResult, [scriptbloc
     $state = "$($st.BackendState)"
     if ($state -eq 'Stopped') { return @{ Kind = 'stopped'; Reason = '' } }
     if ($state -eq 'Running') {
-        if ($st.Self -and $st.Self.Online) { return @{ Kind = 'healthy'; Reason = '' } }
+        if (Test-SelfOnline $st) { return @{ Kind = 'healthy'; Reason = '' } }
         $why = '연결됨으로 보이지만 서버와 연결되지 않음'
     } elseif (@('Starting', 'NoState', '') -contains $state) {
         $why = "상태 '$state'에서 넘어가지 않음"
@@ -136,9 +150,11 @@ function Get-WatchVerdict($ServiceStatus, $StartType, $StatusResult, [scriptbloc
 }
 
 # 멈춘 상태가 이어진 시간에 따라 할 일을 정한다. 시각은 모두 유닉스 초.
-#   $Record: 이전 기록(since, last) 또는 $null, $LastHealAt: 마지막 재시작 시각 또는 $null
+#   $Record: 이전 기록(since, last) 또는 $null, $LastHealAt: 마지막 재시작 시각 또는 $null, $LastHealOk: 그 재시작으로 풀렸는지
 # 결과: start(새로 세기 시작) / wait(아직 기다림) / cooldown(최근에 재시작해서 쉼) / heal(지금 재시작)
-function Get-StuckAction($Record, [int64]$Now, [int]$HealAfter, $LastHealAt) {
+# 쉬는 시간: 지난 재시작이 실패했으면 30분(재시작으로 안 풀리는 원인), 성공했으면 10분.
+#   성공 뒤에도 길게 쉬면 절전에 자주 들어가는 PC에서 다음 멈춤을 30분 동안 못 푼다. 0분이면 재시작이 효과 없이 3~4분마다 반복될 수 있다.
+function Get-StuckAction($Record, [int64]$Now, [int]$HealAfter, $LastHealAt, [bool]$LastHealOk = $false) {
     if (-not $Record) { return 'start' }
     $gap = $Now - [int64]$Record.last
     # 절전·꺼짐으로 확인이 한동안 비었으면 깨어난 직후 바로 재시작하지 않도록 새로 센다.
@@ -148,7 +164,8 @@ function Get-StuckAction($Record, [int64]$Now, [int]$HealAfter, $LastHealAt) {
     if ($elapsed + 0.5 -lt $HealAfter) { return 'wait' }
     if ($null -ne $LastHealAt) {
         $sinceHeal = $Now - [int64]$LastHealAt
-        if ($sinceHeal -ge 0 -and $sinceHeal -lt $healCooldownMinutes * 60) { return 'cooldown' }
+        $cooldown = if ($LastHealOk) { $healOkCooldownMinutes } else { $healCooldownMinutes }
+        if ($sinceHeal -ge 0 -and $sinceHeal -lt $cooldown * 60) { return 'cooldown' }
     }
     return 'heal'
 }
@@ -190,7 +207,8 @@ function Restart-TailscaleService {
         } catch {
             Log '복구: 서비스가 30초 안에 멈추지 않아 tailscaled 프로세스를 끝냄'
             Get-Process -Name tailscaled -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-            Start-Sleep -Seconds 3
+            # 프로세스가 끝나도 서비스 관리자가 Stopped로 바꾸기까지 시간이 걸린다. 그 전에 Start를 건너뛰면 서비스가 꺼진 채 남는다.
+            try { $svc.WaitForStatus('Stopped', [TimeSpan]::FromSeconds(20)) } catch { Log '복구: tailscaled를 끝냈지만 서비스가 20초 안에 Stopped가 되지 않음' }
         }
     }
     $svc.Refresh()
@@ -214,7 +232,7 @@ function Invoke-Heal([string]$Why, [string]$Trigger, [int]$Minutes) {
         $st = (Get-TsStatus).Status
         if (-not $st) { continue }
         $state = "$($st.BackendState)"
-        if ($state -eq 'Running' -and $st.Self -and $st.Self.Online) { $outcome = 'connected'; break }
+        if ($state -eq 'Running' -and (Test-SelfOnline $st)) { $outcome = 'connected'; break }
         if ($state -eq 'Stopped') { $outcome = 'stopped'; break }
         if ($state -eq 'NeedsLogin' -or $state -eq 'NeedsMachineAuth') { $outcome = 'login'; break }
     } while ((Get-Date) -lt $until)
@@ -307,7 +325,10 @@ if ($Watch) {
         $record = Read-JsonFile $stuckFile
         $lastHeal = Read-JsonFile $healFile
         $lastHealAt = if ($lastHeal -and $null -ne $lastHeal.at) { [int64]$lastHeal.at } else { $null }
-        $action = Get-StuckAction -Record $record -Now $now -HealAfter $HealAfterMinutes -LastHealAt $lastHealAt
+        $lastHealOk = $lastHeal -and @('connected', 'stopped') -contains "$($lastHeal.outcome)"
+        $action = Get-StuckAction -Record $record -Now $now -HealAfter $HealAfterMinutes -LastHealAt $lastHealAt -LastHealOk $lastHealOk
+        # 부팅 직후 'Tailscale Auto Connect'가 아직 연결을 재시도하는 중이면 서비스를 재시작해 방해하지 않는다.
+        if ($action -eq 'heal' -and (Get-ScheduledTask -TaskName 'Tailscale Auto Connect' -ErrorAction SilentlyContinue).State -eq 'Running') { $action = 'wait' }
         if ($action -eq 'start') {
             # 절전에서 깨어난 직후처럼 잠깐 연결이 늦는 경우가 흔하므로, 다음 확인에서도 멈춰 있을 때만 로그에 남긴다.
             Write-JsonFile $stuckFile ([ordered]@{ since = $now; last = $now; reason = $verdict.Reason; logged = $false })

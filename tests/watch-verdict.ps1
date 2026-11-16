@@ -28,7 +28,8 @@ $v = Get-WatchVerdict 'Running' 'Automatic' (New-Status 'Running' $false @('Tail
 Assert-Equal 'Running인데 오프라인 + 인터넷 됨 = 멈춤' $v.Kind 'stuck'
 Assert-Equal '멈춤 사유에 Health 메시지 포함' ($v.Reason -like '*network is down*') $true
 Assert-Equal 'Running인데 오프라인 + 인터넷 안 됨 = 네트워크 문제' (Get-WatchVerdict 'Running' 'Automatic' (New-Status 'Running' $false) $unreachable).Kind 'network'
-Assert-Equal 'Self가 없음 + 인터넷 됨 = 멈춤'  (Get-WatchVerdict 'Running' 'Automatic' ([pscustomobject]@{ TimedOut = $false; Status = [pscustomobject]@{ BackendState = 'Running' } }) $reachable).Kind 'stuck'
+Assert-Equal 'Self가 없으면 연결된 것으로 봄' (Get-WatchVerdict 'Running' 'Automatic' ([pscustomobject]@{ TimedOut = $false; Status = [pscustomobject]@{ BackendState = 'Running' } }) $mustNotCall).Kind 'healthy'
+Assert-Equal 'Online 값이 없으면 연결된 것으로 봄(관리 창과 같은 기준)' (Get-WatchVerdict 'Running' 'Automatic' ([pscustomobject]@{ TimedOut = $false; Status = [pscustomobject]@{ BackendState = 'Running'; Self = [pscustomobject]@{ HostName = 'pc' } } }) $mustNotCall).Kind 'healthy'
 Assert-Equal 'Starting에 머묾 + 인터넷 됨'   (Get-WatchVerdict 'Running' 'Automatic' (New-Status 'Starting' $false) $reachable).Kind 'stuck'
 Assert-Equal 'Starting + 인터넷 안 됨'       (Get-WatchVerdict 'Running' 'Automatic' (New-Status 'Starting' $false) $unreachable).Kind 'network'
 Assert-Equal 'NoState + 인터넷 됨'           (Get-WatchVerdict 'Running' 'Automatic' (New-Status 'NoState' $false) $reachable).Kind 'stuck'
@@ -49,8 +50,11 @@ Assert-Equal '3분째'                       (Get-StuckAction (& $rec 180 60) $t
 Assert-Equal '절전 뒤(확인이 22분 비었음)는 새로 셈' (Get-StuckAction (& $rec 1500 1320) $t 3 $null) 'start'
 Assert-Equal '5분 주기 감시는 이어서 셈'   (Get-StuckAction (& $rec 600 300) $t 3 $null) 'heal'
 Assert-Equal '시계가 뒤로 감'              (Get-StuckAction (& $rec 60 -30) $t 3 $null) 'start'
-Assert-Equal '10분 전에 재시작했으면 쉼'   (Get-StuckAction (& $rec 600 60) $t 3 ($t - 600)) 'cooldown'
-Assert-Equal '31분 전에 재시작했으면 다시' (Get-StuckAction (& $rec 600 60) $t 3 ($t - 1860)) 'heal'
+Assert-Equal '10분 전 재시작이 실패했으면 쉼'   (Get-StuckAction (& $rec 600 60) $t 3 ($t - 600) $false) 'cooldown'
+Assert-Equal '31분 전 재시작이 실패했으면 다시' (Get-StuckAction (& $rec 600 60) $t 3 ($t - 1860) $false) 'heal'
+Assert-Equal '15분 전 재시작이 성공했으면 다시(절전이 잦은 PC)' (Get-StuckAction (& $rec 600 60) $t 3 ($t - 900) $true) 'heal'
+Assert-Equal '5분 전 재시작이 성공했어도 바로는 쉼' (Get-StuckAction (& $rec 300 60) $t 3 ($t - 300) $true) 'cooldown'
+Assert-Equal '결과 모름(인자 생략)은 실패로 봄' (Get-StuckAction (& $rec 600 60) $t 3 ($t - 900)) 'cooldown'
 
 if ($script:failures) { Write-Host "$($script:failures)개 실패" -ForegroundColor Red; exit 1 }
 Write-Host '모두 통과'
