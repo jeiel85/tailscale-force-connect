@@ -103,8 +103,8 @@ struct Snapshot {
     state: &'static str,
     title: String,
     detail: String,
-    /// (시각 "MM-DD HH:MM", 내용)
-    log: Vec<(String, String)>,
+    /// (시각 "MM-DD HH:MM", 내용). None이면 이번에는 읽지 못했으니 화면의 기록을 그대로 둔다.
+    log: Option<Vec<(String, String)>>,
     fast_startup: bool,
     active_peers: Vec<String>,
 }
@@ -576,14 +576,13 @@ fn apply_snapshot(ui: &AppWindow, s: &Snapshot, state: &UiState) {
     }
 
     // 같은 기록을 다시 넣으면 화면이 맨 아래로 돌아가므로(위로 올려 읽는 중일 수 있다), 바뀐 때만 넣는다.
-    let lines: Vec<LogLine> = s
-        .log
-        .iter()
-        .map(|(time, text)| LogLine { time: time.into(), text: text.into(), tone: log_tone(text) })
-        .collect();
-    let current = ui.get_log_lines();
-    if current.row_count() != lines.len() || current.iter().zip(&lines).any(|(a, b)| a != *b) {
-        ui.set_log_lines(ModelRc::new(VecModel::from(lines)));
+    if let Some(log) = &s.log {
+        let lines: Vec<LogLine> =
+            log.iter().map(|(time, text)| LogLine { time: time.into(), text: text.into(), tone: log_tone(text) }).collect();
+        let current = ui.get_log_lines();
+        if current.row_count() != lines.len() || current.iter().zip(&lines).any(|(a, b)| a != *b) {
+            ui.set_log_lines(ModelRc::new(VecModel::from(lines)));
+        }
     }
 }
 
@@ -759,11 +758,18 @@ fn stopped_for_minutes() -> Option<i64> {
     Some((elapsed.as_secs() / 60) as i64)
 }
 
-fn read_log_tail(path: &Path) -> Vec<(String, String)> {
-    let Ok(text) = std::fs::read_to_string(path) else { return Vec::new() };
+/// connect.log의 마지막 LOG_LINES줄. 파일이 없으면 빈 목록, 읽지 못하면(connect.ps1이 정리하며 다시 쓰는 중 등) None.
+fn read_log_tail(path: &Path) -> Option<Vec<(String, String)>> {
+    let bytes = match std::fs::read(path) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Some(Vec::new()),
+        Err(_) => return None,
+    };
+    // 쓰는 도중의 마지막 줄처럼 UTF-8이 깨진 부분이 있어도 나머지는 보여 준다.
+    let text = String::from_utf8_lossy(&bytes);
     let lines: Vec<&str> = text.trim_start_matches('\u{feff}').lines().filter(|l| !l.trim().is_empty()).collect();
     let start = lines.len().saturating_sub(LOG_LINES);
-    lines[start..].iter().map(|l| split_log_line(l.trim_end())).collect()
+    Some(lines[start..].iter().map(|l| split_log_line(l.trim_end())).collect())
 }
 
 /// "2026-11-11 23:50:28  내용" → ("11-11 23:50", "내용"). 형식이 다르면 시각 없이 그대로.
@@ -776,13 +782,13 @@ fn split_log_line(l: &str) -> (String, String) {
 }
 
 /// 최근 기록 줄의 색: 0 보통, 1 흐리게(실행 시작 표시), 2 경고.
-/// connect.ps1이 남기는 실패·오류·멈춤 문구(…실패, 오류:, …하지 못함, 로그인이 필요함, 시간 초과, 응답 없음, …되지 않음)를 경고로 본다.
+/// connect.ps1이 남기는 실패·오류·멈춤 문구(…실패, 오류:, …하지 못함, 로그인이 필요함, 시간 초과, 종료 코드, 멈춘 상태, 응답 없음, …되지 않음)를 경고로 본다.
 /// "원인 -> 결과" 줄은 결과만 본다(원인에 '응답 없음'이 있어도 다시 시작해 연결됐으면 보통).
 fn log_tone(text: &str) -> i32 {
     let outcome = text.rsplit("->").next().unwrap_or(text);
     if text.starts_with("---") {
         1
-    } else if ["실패", "오류", "못함", "필요함", "초과", "응답 없음", "되지 않음"].iter().any(|w| outcome.contains(w)) {
+    } else if ["실패", "오류", "못함", "필요함", "초과", "종료 코드", "멈춘 상태", "응답 없음", "되지 않음"].iter().any(|w| outcome.contains(w)) {
         2
     } else {
         0
@@ -1360,10 +1366,29 @@ mod tests {
         assert_eq!(log_tone("실패: 10분 동안 5 회 시도했지만 연결되지 않음 (마지막 상태 'Stopped')"), 2);
         assert_eq!(log_tone("로그인이 필요함(키 만료 등) - 자동 연결 불가"), 2);
         assert_eq!(log_tone("tailscale up 시간 초과"), 2);
+        assert_eq!(log_tone("tailscale up 종료 코드 1"), 2);
+        assert_eq!(log_tone("감시: 멈춘 상태가 2 분째 이어짐 - 서비스 꺼짐(Stopped). 3 분이 되면 Tailscale 서비스를 다시 시작"), 2);
+        assert_eq!(log_tone("감시: 멈춘 상태가 2 분째 이어짐 - 상태 'Starting'에서 넘어가지 않음. 3 분이 되면 Tailscale 서비스를 다시 시작"), 2);
         assert_eq!(log_tone("오류: 액세스가 거부되었습니다"), 2);
         assert_eq!(log_tone("복구: 3 분 동안 멈춤: tailscale status가 20 초 동안 응답 없음 -> 서비스를 다시 시작해 14 초 만에 연결됨"), 0);
         assert_eq!(log_tone("복구 실패: 직접 요청 -> 서비스를 다시 시작했지만 30 초 안에 연결되지 않음 (상태 'Stopped')"), 2);
         assert_eq!(log_tone("복구: 직접 요청 -> 서비스를 다시 시작했지만 로그인이 필요함(키 만료 등)"), 2);
+    }
+
+    #[test]
+    fn log_tail_missing_and_partial() {
+        let dir = std::env::temp_dir().join(format!("tfc-log-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(read_log_tail(&dir.join("none.log")), Some(Vec::new()));
+        let p = dir.join("connect.log");
+        let mut bytes = "\u{feff}2026-11-16 08:58:41  --- 시작 ---\r\n2026-11-16 08:58:48  연결됨 (시도 1)\r\n".as_bytes().to_vec();
+        bytes.extend_from_slice(&[0xEC, 0x97]); // 쓰는 도중 잘린 글자
+        std::fs::write(&p, &bytes).unwrap();
+        let log = read_log_tail(&p).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(log.len(), 3);
+        assert_eq!(log[0], ("11-16 08:58".into(), "--- 시작 ---".into()));
+        assert_eq!(log[1], ("11-16 08:58".into(), "연결됨 (시도 1)".into()));
     }
 
     #[test]

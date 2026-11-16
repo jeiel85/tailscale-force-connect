@@ -67,6 +67,27 @@ component Led inherits Rectangle {
     drop-shadow-color: tint.with-alpha(0.65);
 }
 
+// 줄바꿈되는 글. 레이아웃에 지금 너비에서 실제로 차지하는 높이를 알린다.
+// Slint 1.18은 가로 레이아웃·그리드 칸 안의 줄바꿈 Text 높이를 칸보다 넓은 너비로 재서 낮게 잡는다.
+// 그러면 화면 전체의 최소 높이가 실제보다 작아져, 창이 작을 때 아래쪽이 스크롤로도 보이지 않는다.
+component WrapText {
+    in property <string> text;
+    in property <color> color: Theme.ink;
+    in property <length> font-size: 12px;
+    in property <int> font-weight: 400;
+    height: label.preferred-height;
+    label := Text {
+        x: 0;
+        y: 0;
+        width: root.width;
+        text: root.text;
+        color: root.color;
+        font-size: root.font-size;
+        font-weight: root.font-weight;
+        wrap: word-wrap;
+    }
+}
+
 component Chip inherits Rectangle {
     in property <string> label;
     in property <string> value;
@@ -99,12 +120,10 @@ component Chip inherits Rectangle {
                 horizontal-stretch: 1;
             }
         }
-        Text {
+        WrapText {
             text: value;
-            color: Theme.ink;
             font-size: 13px;
             font-weight: 700;
-            wrap: word-wrap;
         }
     }
 }
@@ -188,7 +207,7 @@ export component AppWindow inherits Window {
     preferred-width: 540px;
     preferred-height: 740px;
     min-width: 480px;
-    min-height: 680px;
+    min-height: 560px;
     background: Theme.bg;
     default-font-family: "Malgun Gothic";
     default-font-size: 14px;
@@ -347,11 +366,9 @@ export component AppWindow inherits Window {
                             font-weight: 700;
                             color: Theme.ink;
                         }
-                        Text {
+                        WrapText {
                             text: "설정은 그대로 두고, 연결을 끊지 않고 업데이트합니다.";
                             color: Theme.muted;
-                            font-size: 12px;
-                            wrap: word-wrap;
                         }
                     }
                     VerticalLayout {
@@ -390,11 +407,10 @@ export component AppWindow inherits Window {
                                 font-weight: 800;
                                 color: Theme.ink;
                             }
-                            Text {
+                            WrapText {
                                 text: root.state-detail;
                                 color: Theme.muted;
                                 font-size: 13px;
-                                wrap: word-wrap;
                             }
                         }
                     }
@@ -442,11 +458,9 @@ export component AppWindow inherits Window {
                             }
                         }
                     }
-                    Text {
+                    WrapText {
                         text: "트레이에서 Disconnect를 눌러도 이 시간이 지나면 다시 연결합니다. 1분마다 확인하므로 몇 분 늦을 수 있고, 끊기거나 다시 연결되면 Windows 알림으로 알려 드립니다.";
                         color: Theme.muted;
-                        font-size: 12px;
-                        wrap: word-wrap;
                     }
                     HorizontalLayout {
                         spacing: 10px;
@@ -484,13 +498,13 @@ export component AppWindow inherits Window {
                                     }
                                 }
                             }
-                            Text {
-                                text: "연결을 몇 초 끊었다가 다시 연결되는지 봅니다. 원격으로 접속한 것 같으면 한 번 더 묻습니다.";
-                                color: Theme.muted;
-                                font-size: 12px;
-                                wrap: word-wrap;
-                                vertical-alignment: center;
+                            VerticalLayout {
+                                alignment: center;
                                 horizontal-stretch: 1;
+                                WrapText {
+                                    text: "연결을 몇 초 끊었다가 다시 연결되는지 봅니다. 원격으로 접속한 것 같으면 한 번 더 묻습니다.";
+                                    color: Theme.muted;
+                                }
                             }
                         }
                         Row {
@@ -505,13 +519,13 @@ export component AppWindow inherits Window {
                                     }
                                 }
                             }
-                            Text {
-                                text: "트레이는 정상인데 다른 기기에서 접속이 안 될 때 누르세요. 연결이 잠깐 끊깁니다.";
-                                color: Theme.muted;
-                                font-size: 12px;
-                                wrap: word-wrap;
-                                vertical-alignment: center;
+                            VerticalLayout {
+                                alignment: center;
                                 horizontal-stretch: 1;
+                                WrapText {
+                                    text: "트레이는 정상인데 다른 기기에서 접속이 안 될 때 누르세요. 연결이 잠깐 끊깁니다.";
+                                    color: Theme.muted;
+                                }
                             }
                         }
                     }
@@ -527,11 +541,9 @@ export component AppWindow inherits Window {
                     SectionTitle {
                         text: "설치";
                     }
-                    Text {
+                    WrapText {
                         text: "부팅할 때마다 Tailscale을 다시 연결하는 예약 작업을 등록합니다. 관리자 권한(UAC)이 한 번 필요합니다.";
                         color: Theme.muted;
-                        font-size: 12px;
-                        wrap: word-wrap;
                     }
                     HorizontalLayout {
                         spacing: 10px;
@@ -586,11 +598,8 @@ export component AppWindow inherits Window {
                             background: Theme.amber;
                         }
                     }
-                    Text {
+                    WrapText {
                         text: "Windows 빠른 시작이 켜져 있습니다. '종료 후 전원 켜기'에서는 부팅 시 연결이 실행되지 않습니다(재시작·정전 뒤에는 동작). 제어판 > 전원 옵션에서 끌 수 있습니다.";
-                        color: Theme.ink;
-                        font-size: 12px;
-                        wrap: word-wrap;
                         horizontal-stretch: 1;
                     }
                 }
@@ -609,11 +618,10 @@ export component AppWindow inherits Window {
                     spacing: 6px;
                     HorizontalLayout {
                         spacing: 10px;
-                        Text {
+                        WrapText {
                             text: root.result-title;
+                            font-size: 14px;
                             font-weight: 700;
-                            color: Theme.ink;
-                            wrap: word-wrap;
                             horizontal-stretch: 1;
                         }
                         LinkText {
@@ -633,11 +641,8 @@ export component AppWindow inherits Window {
                             content-width: self.width;
                             result-body := VerticalLayout {
                                 padding-right: 10px;
-                                Text {
+                                WrapText {
                                     text: root.result-text;
-                                    color: Theme.ink;
-                                    font-size: 12px;
-                                    wrap: word-wrap;
                                 }
                             }
                         }
@@ -721,7 +726,7 @@ export component AppWindow inherits Window {
                             }
                         }
                         // 위로 가려진 줄이 있으면 위쪽 끝을 흐리게 해 기록이 위로 이어진다는 것을 보여 준다.
-                        if log-view.content-y < 0: Rectangle {
+                        if log-view.content-y < -1px: Rectangle {
                             x: 0;
                             y: 0;
                             width: parent.width;
