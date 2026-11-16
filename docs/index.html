@@ -257,8 +257,8 @@
           <li><strong>설정</strong>: 직접 끊은 뒤 다시 연결할 시간을 고르고 적용합니다. 이때만 UAC 창이 뜹니다.</li>
           <li><strong>최근 기록</strong>: 부팅 때마다, 자동 재연결 때마다 남는 기록을 봅니다.</li>
           <li><strong>제거</strong>: 버튼을 두 번 누르면 모두 지웁니다.</li>
-          <li><strong>Windows 알림</strong>: 1분마다 연결 상태를 확인해, 끊기면 "약 1시간 뒤 다시 연결합니다", 돌아오면 "다시 연결됐습니다"라고 알립니다. 새 버전이 나와도 알려 줍니다. 알림을 누르면 관리 창이 열립니다.</li>
-          <li><strong>업데이트</strong>: 열 때 새 버전을 확인하고, 있으면 알림 창에서 버튼 한 번으로 설정을 유지한 채 연결을 끊지 않고 업데이트합니다. 버전 표시를 누르면 직접 확인할 수도 있습니다. 받은 파일은 GitHub에 기록된 SHA-256으로 검증합니다.</li>
+          <li><strong>Windows 알림</strong>: 1분마다 연결 상태를 확인해, 끊기면 "약 1시간 뒤 다시 연결합니다", 돌아오면 "다시 연결됐습니다"라고 알립니다. 새 버전이 나와도 알려 줍니다. 알림을 누르면 관리 창이 열립니다. 관리 창의 <strong>Windows 알림</strong> 선택으로 사용자마다 끌 수 있습니다.</li>
+          <li><strong>업데이트</strong>: 열 때 새 버전을 확인하고, 있으면 알림 창에서 버튼 한 번으로 설정을 유지한 채 연결을 끊지 않고 업데이트합니다. 버전 표시를 누르면 직접 확인할 수도 있습니다. 받은 파일은 GitHub에 기록된 SHA-256으로 검증하고, 설치된 것보다 낮은 버전으로는 내려가지 않으며, 도중에 실패하면 이전 버전으로 되돌립니다.</li>
           <li>Rust와 Slint로 만든 약 8MB짜리 실행 파일입니다. GPU 없이 그려서 원격 데스크톱에서도 열립니다.</li>
         </ul>
       </div>
@@ -276,7 +276,7 @@
           <h3>한 줄로 설치</h3>
           <p>cmd나 PowerShell에 붙여 넣으면 최신 릴리스를 받아 설치합니다.</p>
           <div class="cmd"><pre><code>powershell -c "irm https://jeiel85.github.io/tailscale-force-connect/get.ps1 | iex"</code></pre><button type="button" class="copy">복사</button></div>
-          <p class="hint">인터넷에서 받은 스크립트를 바로 실행하는 방식입니다. <a href="get.ps1">get.ps1 내용 보기</a></p>
+          <p class="hint">인터넷에서 받은 스크립트를 바로 실행하는 방식입니다. 받은 zip은 GitHub에 기록된 SHA-256과 비교하고, 관리자만 쓸 수 있는 폴더로 옮겨 다시 확인한 뒤 실행합니다. <a href="get.ps1">get.ps1 내용 보기</a></p>
         </div>
         <div class="method">
           <h3>zip 받아서 더블클릭</h3>
@@ -290,7 +290,7 @@ cd tailscale-force-connect
 powershell -ExecutionPolicy Bypass -File .\install.ps1</code></pre><button type="button" class="copy">복사</button></div>
         </div>
         <div class="method notes">
-          <p>설치가 끝나면 몇 초 동안 일부러 연결을 끊었다가 다시 연결되는지 확인합니다. 출력 끝에 <code>검증 성공</code>이 보이면 설치가 끝난 것입니다. 그 PC에 Tailscale로 원격 접속 중이라면 이 확인을 건너뛰세요. 한 줄 설치는 cmd라면 앞에 <code>set TFC_NOTEST=1 &amp;&amp;</code>를, PowerShell이라면 <code>$env:TFC_NOTEST=1;</code>를 붙이고, zip은 <code>install.cmd -NoTest</code>로 실행합니다.</p>
+          <p>설치가 끝나면 몇 초 동안 일부러 연결을 끊었다가 다시 연결되는지 확인합니다. 출력 끝에 <code>검증 성공</code>이 보이면 설치가 끝난 것입니다. 그 PC에 Tailscale로 원격 접속 중이라면 이 확인을 건너뛰세요(관리 창의 [동작 확인]은 원격 접속 중인 것 같으면 한 번 더 묻습니다). 한 줄 설치는 cmd라면 앞에 <code>set TFC_NOTEST=1 &amp;&amp;</code>를, PowerShell이라면 <code>$env:TFC_NOTEST=1;</code>를 붙이고, zip은 <code>install.cmd -NoTest</code>로 실행합니다.</p>
           <p><strong>Windows 빠른 시작</strong>이 켜져 있으면 일반 종료 후 전원을 켤 때는 동작하지 않습니다. 재시작과 정전 뒤에는 동작합니다. 설치 스크립트가 빠른 시작을 감지하면 끄는 방법을 알려 줍니다.</p>
           <p>관리 콘솔에서 그 기기의 <strong>Disable key expiry</strong>도 켜 두세요. 키가 만료되면 다시 로그인해야 해서 자동 연결이 되지 않습니다.</p>
         </div>

@@ -47,7 +47,8 @@ Tailscale Windows 클라이언트 **1.84 이상**에는 비슷한 목적의 [시
 
 설치하면 **Tailscale Force Connect** 관리 창이 함께 설치되고, 시작 메뉴에서 열 수 있습니다. 트레이에 상주하지 않고 열었을 때만 동작합니다.
 
-- 지금 연결 상태와 Tailscale 기기 이름·IP. 트레이는 '연결됨'인데 실제로는 서버와 연결되지 않았으면 **연결 안 됨**(주황)으로 보여 줍니다.
+- 지금 연결 상태와 Tailscale 기기 이름·IP. 트레이는 '연결됨'인데 실제로는 서버와 연결되지 않았으면 **연결 안 됨**(주황)으로,
+  `tailscale status`가 10초 안에 답하지 않으면 **응답 없음**(주황)으로 보여 줍니다.
 - 부팅 시 자동 연결, 직접 끊은 뒤 자동 재연결, 멈춤 감시 설정. 끊긴 상태라면 몇 분 뒤 다시 연결되는지도 보여 줍니다.
 - 최근 기록(`connect.log`)
 - 버튼: 재연결 시간 바꾸기, 동작 확인, **Tailscale 다시 시작**(서비스 재시작), 제거. 이 버튼을 누를 때만 UAC 창이 뜹니다.
@@ -65,6 +66,8 @@ Tailscale Windows 클라이언트 **1.84 이상**에는 비슷한 목적의 [시
 | **새 버전 vX.Y.Z** | 로그인할 때(2분 뒤)와 매일 12:30에 확인해 새 버전이 있을 때(버전마다 한 번) | 관리 창이 열리고 업데이트 창이 뜸 |
 
 - 연결 상태는 **1분마다** 확인합니다. Tailscale이 끊김을 알려 주는 이벤트가 없어서, 상주 프로세스 없이 할 수 있는 가장 빠른 방법입니다.
+- **알림 끄기:** 관리 창의 **Windows 알림** 선택을 끄면 위 알림을 모두 띄우지 않습니다. 사용자마다 따로 정하며 관리자 권한이 필요 없습니다
+  (`%LOCALAPPDATA%\Tailscale Force Connect\notify-off.txt`가 생깁니다). 예약 작업은 그대로 돌지만 아무것도 하지 않고 바로 끝납니다.
 - 알림이 이 앱 이름과 아이콘으로 보이도록 시작 메뉴 바로가기에 앱 ID(`TailscaleForceConnect.Manager`)를 기록합니다. 알림을 누르면 `tailscale-force-connect:` 링크로 관리 창을 엽니다.
 - 알림이 보이지 않으면 Windows 설정 → 시스템 → 알림에서 **Tailscale Force Connect**가 켜져 있는지, 방해 금지 모드가 꺼져 있는지 확인하세요.
   아래 명령으로 시험 알림을 띄울 수 있습니다.
@@ -73,11 +76,15 @@ Tailscale Windows 클라이언트 **1.84 이상**에는 비슷한 목적의 [시
   & "C:\Program Files\Tailscale Force Connect\TailscaleForceConnect.exe" --notify-test
   ```
 
+- `tailscale-force-connect:` 링크로 열리면(알림, 웹 페이지) 다른 인자는 보지 않고 관리 창만 엽니다. 웹 페이지가 링크에 `--watch-notify` 같은 인자를 끼워 넣어도 창 없는 동작은 실행되지 않습니다.
+
 창을 여는 것만으로는 관리자 권한이 필요 없습니다. 상태는 일반 권한으로 읽을 수 있는 정보(`tailscale status`, `settings.json`, `connect.log`)만 씁니다.
 버튼은 `C:\Program Files\Tailscale Force Connect\`에 있는 스크립트를 관리자 권한으로 실행합니다. 이 폴더는 관리자만 쓸 수 있습니다.
 Rust와 [Slint](https://slint.dev)로 만들었고(소프트웨어 렌더러), GPU가 없는 환경이나 원격 데스크톱에서도 그려집니다. 실행 파일은 약 8MB입니다.
 
 > **원격으로 접속 중이라면** "동작 확인"을 누르지 마세요. 연결을 몇 초 끊었다가 다시 연결되는지 보는 기능이라, 그 사이 원격 연결이 끊깁니다.
+> 관리 창은 원격 데스크톱 세션에서 열렸거나 최근 2분 안에 Tailscale로 트래픽이 오간 기기(`tailscale status`의 `Active`)가 있으면
+> "원격으로 접속 중인 것 같습니다" 창을 띄워 한 번 더 묻습니다. AnyDesk 같은 다른 원격 도구는 Tailscale로 오가는 경우에만 알아챕니다.
 
 ## 업데이트
 
@@ -86,9 +93,15 @@ Rust와 [Slint](https://slint.dev)로 만들었고(소프트웨어 렌더러), G
 
 업데이트는 [`update.ps1`](update.ps1)이 관리자 권한으로 진행합니다.
 
-1. GitHub 최신 릴리스의 zip을 관리자만 쓸 수 있는 `C:\Program Files\Tailscale Force Connect\` 안의 임시 폴더에 받습니다.
-2. GitHub이 릴리스 파일마다 기록하는 **SHA-256 값과 비교**합니다. 다르거나 기록이 없으면 중단합니다.
-3. 지금의 자동 재연결·멈춤 감시 설정을 유지한 채 `install.ps1 -NoTest`로 설치합니다. **연결은 끊지 않습니다.**
+1. GitHub 최신 릴리스가 설치된 버전(`settings.json`의 `version`)보다 새것인지 봅니다. 같으면 아무것도 하지 않고, **낮으면 설치하지 않습니다**(직접 실행할 때 이전 버전으로 내려가지 않도록. 일부러 내리거나 다시 설치하려면 `-Force`).
+2. zip을 관리자만 쓸 수 있는 `C:\Program Files\Tailscale Force Connect\` 안의 임시 폴더에 받습니다.
+3. GitHub이 릴리스 파일마다 기록하는 **SHA-256 값과 비교**합니다. 다르거나 기록이 없으면 중단합니다.
+4. 지금 설치된 관리 앱 파일을 같은 임시 폴더에 백업합니다.
+5. 지금의 자동 재연결·멈춤 감시 설정을 유지한 채 `install.ps1 -NoTest`로 설치합니다. **연결은 끊지 않습니다.**
+6. 설치가 도중에 실패해 파일이 이미 바뀌었으면, 백업해 둔 **이전 버전의 `install.ps1`로 다시 설치해 되돌립니다**(새 관리 앱과 이전 예약 작업이 섞이지 않도록).
+   아무것도 바뀌기 전에 실패했으면(로그인 필요 등) 되돌릴 것이 없으므로 그대로 둡니다. 되돌리기는 v1.7.0 이상에서 업데이트할 때부터 동작합니다.
+
+설치할 때 `C:\Program Files\Tailscale Force Connect\`에서 알려진 파일(관리 창, `install.ps1`, `uninstall.ps1`, `connect.ps1`, `update.ps1`) 밖의 파일은 지웁니다. 이전 버전에만 있던 파일이 남지 않게 하려는 것입니다.
 
 새 버전은 자동으로 확인하지만, 설치는 사용자가 눌러야 진행합니다. 사용자 승인 없이 SYSTEM 권한으로 몰래 업데이트하는 방식은 쓰지 않습니다. 그 방식이면 릴리스가 오염됐을 때 받은 코드가 모든 설치 PC에서 곧바로 SYSTEM 권한으로 실행되기 때문입니다([DECISIONS.md](DECISIONS.md)).
 명령으로 업데이트하려면 한 줄 설치를 다시 실행하거나, 관리자 PowerShell에서 `& "C:\Program Files\Tailscale Force Connect\update.ps1"`를 실행합니다.
@@ -104,8 +117,15 @@ Rust와 [Slint](https://slint.dev)로 만들었고(소프트웨어 렌더러), G
 powershell -c "irm https://jeiel85.github.io/tailscale-force-connect/get.ps1 | iex"
 ```
 
-[`get.ps1`](docs/get.ps1)이 [최신 릴리스](https://github.com/jeiel85/tailscale-force-connect/releases/latest) zip을 임시 폴더에 받아 `install.ps1`을 실행합니다.
-`install.ps1`은 먼저 관리 창을 Program Files에 설치하고 나서 예약 작업을 등록합니다. 다 끝나면 관리 창을 열고 임시 폴더를 지웁니다. 인터넷에서 받은 스크립트를 바로 실행하는 방식이니, 먼저 내용을 읽어 보고 싶다면 방법 2를 쓰세요.
+[`get.ps1`](docs/get.ps1)이 하는 일:
+
+1. GitHub API로 [최신 릴리스](https://github.com/jeiel85/tailscale-force-connect/releases/latest)와 GitHub이 그 zip에 기록한 **SHA-256**을 확인하고, 그 버전의 zip을 임시 폴더에 받아 값을 비교합니다. 다르거나 기록이 없으면 중단합니다.
+2. UAC로 관리자 PowerShell을 엽니다. 이 창은 zip을 **관리자만 쓸 수 있는 새 폴더**(`C:\Windows\Temp\tailscale-force-connect-…`, 만들 때부터 Administrators·SYSTEM만 쓸 수 있는 권한)로 복사해 SHA-256을 다시 확인하고, 거기서 압축을 풀어 `install.ps1`을 실행합니다.
+   UAC 승인을 기다리는 동안 같은 사용자의 다른 프로그램이 임시 폴더의 파일을 바꿔치기해도 관리자 권한으로 실행되지 않습니다(관리자 창이 실행하는 작은 단계 스크립트도 명령줄에 실린 SHA-256과 맞을 때만 실행).
+3. `install.ps1`은 먼저 관리 창을 Program Files에 설치하고 나서 예약 작업을 등록합니다. 결과를 이 창에 보여 주고 관리 창을 연 뒤 임시 폴더를 지웁니다.
+
+GitHub API는 같은 IP에서 시간당 60번까지만 익명으로 부를 수 있습니다. 한 사무실에서 여러 PC를 연달아 설치하다 "rate limit" 오류가 나면 잠시 뒤 다시 실행하세요.
+인터넷에서 받은 스크립트를 바로 실행하는 방식이니, 먼저 내용을 읽어 보고 싶다면 방법 2를 쓰세요.
 
 **방법 2. zip 받아서 더블클릭**
 
@@ -155,11 +175,11 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1
 | 파일 | 역할 |
 |---|---|
 | `connect.ps1` | 부팅 때 실행되는 본체입니다. 서비스가 꺼져 있으면 켜고, 연결될 때까지 최대 10분 동안 10초 간격으로 `tailscale up`을 실행합니다. 결과는 로그 파일과 이벤트 로그에 남깁니다. `-Watch`는 감시 작업이, `-Heal`(서비스 바로 재시작)은 관리 창의 [Tailscale 다시 시작] 버튼이 실행합니다. |
-| `tests/watch-verdict.ps1` | 감시 판정(멈춤인지, 재시작할 때인지)을 실제 Tailscale 없이 시험합니다. 릴리스 zip에는 들어가지 않습니다. |
+| `tests/*.ps1` | 관리자 권한·실제 Tailscale 없이 돌리는 시험입니다. `watch-verdict.ps1`(감시 판정, 서비스 경로 해석), `update-helpers.ps1`(업데이트 버전 판단·되돌리기), `web-install.ps1`(한 줄 설치·제거의 무결성 확인, `-Network`면 실제 릴리스로 SHA-256 확인). 릴리스 zip에는 들어가지 않습니다. |
 | `install.ps1` | `connect.ps1`을 `C:\ProgramData\TailscaleAutoConnect\`에 복사하고, Unattended 모드를 켜고, 이벤트 로그 원본과 예약 작업(부팅 시 연결, 자동 재연결·멈춤 감시, 알림)을 등록한 뒤 동작을 확인합니다. |
-| `uninstall.ps1` | 예약 작업 2개, 설치 폴더, 이벤트 로그 원본을 지우고 결과를 보여 줍니다. Tailscale 본체와 Unattended 설정은 건드리지 않습니다. |
+| `uninstall.ps1` | 예약 작업, 설치 폴더, 관리 앱, 이벤트 로그 원본, 사용자별 알림 기록을 지우고 결과를 보여 줍니다. Tailscale 본체와 Unattended 설정은 건드리지 않습니다. |
 | `TailscaleForceConnect.exe --watch-notify` / `--notify-update` / `--notify-test` | 창 없이 끊김·재연결 알림 / 새 버전 알림 / 시험 알림을 띄웁니다(예약 작업이 실행). |
-| `update.ps1` | 최신 릴리스를 받아 SHA-256을 확인한 뒤, 설정을 유지하고 연결을 끊지 않은 채 설치합니다. 관리 창의 [업데이트] 버튼이 실행합니다. |
+| `update.ps1` | 최신 릴리스가 새 버전이면 받아 SHA-256을 확인한 뒤, 설정을 유지하고 연결을 끊지 않은 채 설치합니다. 실패하면 이전 버전으로 되돌립니다. 관리 창의 [업데이트] 버튼이 실행합니다. |
 | `install.cmd`, `uninstall.cmd` | 더블클릭용 실행 파일입니다. 같은 폴더의 `.ps1`을 실행합니다. |
 | `TailscaleForceConnect.exe` | 관리 창입니다(릴리스 zip에만 들어 있음). 소스는 `gui/`에 있습니다. |
 | `gui/` | 관리 창 소스(Rust + Slint)입니다. |
@@ -171,7 +191,7 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1
 - 예약 작업 **`Tailscale Auto Connect`**: 시작 시 20초 뒤에 SYSTEM 계정으로 실행되며, 실행 시간은 최대 15분입니다.
 - 예약 작업 **`Tailscale Force Connect Status Alert`**: 로그인한 사용자 권한으로 1분마다 `TailscaleForceConnect.exe --watch-notify`를 실행해 끊김·재연결 알림을 띄웁니다.
 - 예약 작업 **`Tailscale Force Connect Update Check`**: 로그인한 사용자 권한으로 로그인 2분 뒤와 매일 12:30에 `--notify-update`를 실행해 새 버전 알림을 띄웁니다.
-- 레지스트리 `HKLM\SOFTWARE\Classes\tailscale-force-connect`: 알림을 누르면 관리 창을 여는 링크입니다. 알림 표시 기록은 사용자별로 `%LOCALAPPDATA%\Tailscale Force Connect\`에 남습니다.
+- 레지스트리 `HKLM\SOFTWARE\Classes\tailscale-force-connect`: 알림을 누르면 관리 창을 여는 링크입니다. 알림 표시 기록과 알림 끄기 표시는 사용자별로 `%LOCALAPPDATA%\Tailscale Force Connect\`에 남고, 제거할 때 함께 지웁니다.
 - 예약 작업 **`Tailscale Auto Reconnect`**: SYSTEM 계정으로 1분마다 실행됩니다(`connect.ps1 -Watch`). 정상이면 아무 기록도 남기지 않습니다.
   - 자동 재연결: 끊긴 상태(`Stopped`)를 처음 본 시각을 설치 폴더의 `stopped-since.txt`에 적어 두고, 설정한 시간이 지나도 끊겨 있으면 `tailscale up`을 실행합니다.
   - 멈춤 감시: 아래 상태가 이어진 시간을 `stuck-since.json`에 적어 두고, 설정한 시간(기본 3분)이 지나면 Tailscale 서비스를 다시 시작합니다.
@@ -250,9 +270,9 @@ tailscale status
 powershell -c "irm https://jeiel85.github.io/tailscale-force-connect/remove.ps1 | iex"
 ```
 
-[`remove.ps1`](docs/remove.ps1)은 설치할 때 복사해 둔 `C:\ProgramData\TailscaleAutoConnect\uninstall.ps1`을 실행합니다.
-그 파일이 없으면 최신 릴리스 zip을 받아 그 안의 `uninstall.ps1`을 실행합니다.
-예약 작업, 설치 폴더, 관리 창과 시작 메뉴 바로가기, 이벤트 로그 원본을 지우고 결과를 보여 줍니다. 그 밖의 Tailscale 설정은 그대로 남습니다.
+[`remove.ps1`](docs/remove.ps1)은 설치할 때 복사해 둔 `C:\ProgramData\TailscaleAutoConnect\uninstall.ps1`을 실행합니다(그 폴더와 파일이 관리자만 쓸 수 있을 때만).
+그 파일이 없거나 믿을 수 없으면 한 줄 설치와 같은 방식으로 최신 릴리스 zip을 받아 SHA-256을 확인하고, 관리자 전용 폴더에서 그 안의 `uninstall.ps1`을 실행합니다.
+예약 작업, 설치 폴더, 관리 창과 시작 메뉴 바로가기, 이벤트 로그 원본, 사용자별 알림 기록을 지우고 결과를 보여 줍니다. 그 밖의 Tailscale 설정은 그대로 남습니다.
 관리 창의 "제거" 버튼을 두 번 눌러도 됩니다(창이 닫히고 결과 창이 뜹니다).
 
 인터넷을 쓰지 않으려면 zip이나 git으로 받은 폴더에서 `uninstall.cmd`를 더블클릭하거나 아래 명령을 실행하세요.
@@ -275,6 +295,9 @@ gh release create vX.Y.Z dist/tailscale-force-connect.zip --title vX.Y.Z --notes
 `build-release.ps1`은 관리 창을 릴리스 빌드하고, `git archive`로 설치에 필요한 파일만 꺼낸 뒤(무엇을 뺄지는 `.gitattributes`의 `export-ignore`가 정함) 실행 파일을 넣어 zip을 만듭니다.
 
 한 줄 설치와 다운로드 링크는 `releases/latest`를 가리키므로 asset 이름은 항상 `tailscale-force-connect.zip`으로 둡니다.
+한 줄 설치·제거·업데이트는 모두 asset의 SHA-256 기록(`digest`)이 없으면 멈추므로, 릴리스를 만든 뒤 `gh release view vX.Y.Z --json assets`로 `digest`가 있는지 확인합니다.
+
+관리 창 화면은 개발 빌드(`cargo run`)에서 환경 변수로 확인할 수 있습니다: `TFC_DATA_DIR`(설치 폴더 대신 읽을 폴더), `TFC_FAKE_STATUS_FILE`(`tailscale status --json` 대신 읽을 파일, `timeout`이면 응답 없음), `TFC_FAKE_LATEST`(최신 버전), `TFC_FORCE_LIGHT`(밝은 테마).
 
 ## 라이선스
 

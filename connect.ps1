@@ -43,12 +43,19 @@ function Write-Result($eventId, $entryType, $msg) {
     } catch { }
 }
 
+# 서비스 ImagePath에서 실행 파일 경로만 꺼낸다. 따옴표가 없으면 Windows처럼 '.exe'로 끝나는 곳까지를 경로로 본다
+# (C:\Program Files\Tailscale\tailscaled.exe 처럼 공백이 든 경로를 따옴표 없이 등록한 경우).
+function Get-DaemonPath([string]$ImagePath) {
+    if ($ImagePath -match '^\s*"([^"]+)"') { return $Matches[1] }
+    if ($ImagePath -match '^\s*(.+?\.exe)(?=\s|$)') { return $Matches[1] }
+    return ($ImagePath.Trim() -split '\s+')[0]
+}
+
 # tailscale.exe는 서비스(tailscaled.exe)와 같은 폴더에 있다. 기본 경로가 아닌 설치도 찾는다.
 function Find-TailscaleExe {
     try {
         $img = (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Services\Tailscale' -ErrorAction Stop).ImagePath
-        $img = [Environment]::ExpandEnvironmentVariables($img)
-        $daemon = if ($img -match '^\s*"([^"]+)"') { $Matches[1] } else { ($img.Trim() -split '\s+')[0] }
+        $daemon = Get-DaemonPath ([Environment]::ExpandEnvironmentVariables($img))
         $candidate = Join-Path (Split-Path $daemon -Parent) 'tailscale.exe'
         if (Test-Path $candidate) { return $candidate }
     } catch { }
@@ -397,7 +404,10 @@ while ((Get-Date) -lt $deadline) {
         $svc = Get-Service -Name Tailscale -ErrorAction Stop
         if ($svc.Status -ne 'Running') {
             Log "서비스 상태 $($svc.Status) -> 시작 시도"
-            Start-Service -Name Tailscale -ErrorAction Stop
+            # Start-Service는 시작이 끝날 때까지 시간 제한 없이 기다리므로, 시작만 요청하고 30초까지만 기다린다.
+            # 시간이 넘으면 예외가 나서 아래 catch에 기록되고 다음 시도로 넘어간다(작업 제한 15분에 걸려 기록 없이 끝나지 않도록).
+            if ($svc.Status -eq 'Stopped') { $svc.Start() }
+            $svc.WaitForStatus('Running', [TimeSpan]::FromSeconds(30))
             Start-Sleep -Seconds 5
         }
 

@@ -56,6 +56,15 @@ Assert-Equal '15분 전 재시작이 성공했으면 다시(절전이 잦은 PC)
 Assert-Equal '5분 전 재시작이 성공했어도 바로는 쉼' (Get-StuckAction (& $rec 300 60) $t 3 ($t - 300) $true) 'cooldown'
 Assert-Equal '결과 모름(인자 생략)은 실패로 봄' (Get-StuckAction (& $rec 600 60) $t 3 ($t - 900)) 'cooldown'
 
+# --- Get-DaemonPath (서비스 ImagePath에서 tailscaled.exe 경로 꺼내기) ---
+Assert-Equal '따옴표 경로'              (Get-DaemonPath '"C:\Program Files\Tailscale\tailscaled.exe"') 'C:\Program Files\Tailscale\tailscaled.exe'
+Assert-Equal '따옴표 경로 + 인자'       (Get-DaemonPath '"C:\Program Files\Tailscale\tailscaled.exe" --port 41641') 'C:\Program Files\Tailscale\tailscaled.exe'
+Assert-Equal '따옴표 없는 공백 경로'    (Get-DaemonPath 'C:\Program Files\Tailscale\tailscaled.exe') 'C:\Program Files\Tailscale\tailscaled.exe'
+Assert-Equal '따옴표 없는 공백 경로 + 인자' (Get-DaemonPath 'C:\Program Files\Tailscale\tailscaled.exe --port 41641') 'C:\Program Files\Tailscale\tailscaled.exe'
+Assert-Equal '대문자 EXE'               (Get-DaemonPath 'D:\Apps\Tailscale\TAILSCALED.EXE') 'D:\Apps\Tailscale\TAILSCALED.EXE'
+Assert-Equal '공백 없는 경로'           (Get-DaemonPath '  D:\Tailscale\tailscaled.exe') 'D:\Tailscale\tailscaled.exe'
+Assert-Equal '.exe가 없으면 첫 토큰'    (Get-DaemonPath 'D:\Tailscale\tailscaled --x') 'D:\Tailscale\tailscaled'
+
 if ($script:failures) { Write-Host "$($script:failures)개 실패" -ForegroundColor Red; exit 1 }
 Write-Host '모두 통과'
 exit 0
