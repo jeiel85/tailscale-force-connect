@@ -133,9 +133,12 @@ function Get-TfcLatestPackage([string]$Dir) {
 # Writes the elevated step for $RunName to $Dir and returns the -Command text that runs it only if its SHA-256 matches.
 function New-TfcElevatedCommand([string]$Dir, [string]$Zip, [string]$Sha256, [string]$RunName, [string[]]$RunArgs, [string]$ResultFile) {
     $argText = (@($RunArgs) | ForEach-Object { ConvertTo-TfcLiteral $_ }) -join ', '
-    $text = Get-TfcElevatedTemplate
-    $text = $text.Replace('__SRC__', (ConvertTo-TfcLiteral $Zip)).Replace('__SHA__', (ConvertTo-TfcLiteral $Sha256))
-    $text = $text.Replace('__SCRIPT__', (ConvertTo-TfcLiteral $RunName)).Replace('__ARGS__', $argText).Replace('__RESULT__', (ConvertTo-TfcLiteral $ResultFile))
+    $values = @{
+        SRC = ConvertTo-TfcLiteral $Zip; SHA = ConvertTo-TfcLiteral $Sha256; SCRIPT = ConvertTo-TfcLiteral $RunName
+        ARGS = $argText; RESULT = ConvertTo-TfcLiteral $ResultFile
+    }
+    # One pass, so a value that happens to contain a later token (e.g. __RESULT__) is never substituted again.
+    $text = [regex]::Replace((Get-TfcElevatedTemplate), '__(SRC|SHA|SCRIPT|ARGS|RESULT)__', [Text.RegularExpressions.MatchEvaluator]{ param($m) $values[$m.Groups[1].Value] })
     $bytes = (New-Object Text.UTF8Encoding $false).GetBytes($text)
     $file = Join-Path $Dir 'elevated-step.ps1'
     [IO.File]::WriteAllBytes($file, $bytes)

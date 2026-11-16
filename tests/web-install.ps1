@@ -79,6 +79,12 @@ exit 7
     Assert-Equal '임시 폴더가 아니라 별도 폴더에서 실행' ($report[1] -like "root=$stageRoot\tailscale-force-connect-*\tailscale-force-connect") $true
     Assert-Equal '끝나면 폴더 삭제' @(Get-ChildItem -LiteralPath $stageRoot -Force).Count 0
 
+    # 1-1) 인자 값에 다른 자리표시자·따옴표가 들어 있어도 그대로 전달
+    $result = Join-Path $root 'result-1b.txt'
+    $cmd = New-TfcElevatedCommand -Dir $dl -Zip $zip -Sha256 $sha -RunName 'install.ps1' -RunArgs @('-ReconnectAfter', "__RESULT__'x") -ResultFile $result
+    Assert-Equal '자리표시자가 든 값' (Invoke-Step $cmd) 7
+    Assert-Equal '자리표시자가 든 값 그대로' (Get-Content -LiteralPath $result)[0] "NoTest=False Reconnect=__RESULT__'x"
+
     # 2) 받은 뒤 zip이 바뀜 → 실행하지 않고 결과 파일에 사유
     $result = Join-Path $root 'result-2.txt'
     $cmd = New-TfcElevatedCommand -Dir $dl -Zip $zip -Sha256 ('0' * 64) -RunName 'install.ps1' -RunArgs @() -ResultFile $result

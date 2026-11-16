@@ -40,12 +40,15 @@ function Get-UpdateAction([string]$Latest, [string]$Installed, [bool]$ForceInsta
 }
 
 # 지금 설치된 관리 앱 파일(이전 버전)을 $Dest에 복사한다. 이전 버전의 install.ps1과 실행 파일이 있어야 되돌릴 수 있다.
-function Backup-AppFiles([string]$From, [string]$Dest) {
+# 예약 작업이 실행하는 $Data\connect.ps1도 data-connect.ps1로 복사해, 설치가 그 파일을 바꿨는지 비교할 기준으로 쓴다.
+function Backup-AppFiles([string]$From, [string]$Dest, [string]$Data) {
     New-Item -ItemType Directory -Path $Dest -Force | Out-Null
     foreach ($f in $appFiles) {
         $src = Join-Path $From $f
         if (Test-Path -LiteralPath $src) { Copy-Item -LiteralPath $src -Destination $Dest -Force }
     }
+    $dataScript = Join-Path $Data 'connect.ps1'
+    if ($Data -and (Test-Path -LiteralPath $dataScript)) { Copy-Item -LiteralPath $dataScript -Destination (Join-Path $Dest 'data-connect.ps1') -Force }
     return (Test-Path -LiteralPath (Join-Path $Dest 'install.ps1')) -and (Test-Path -LiteralPath (Join-Path $Dest $appName))
 }
 
@@ -60,9 +63,17 @@ function Test-InstallChanged([string]$App, [string]$Backup, [string]$Data) {
     foreach ($f in $appFiles) {
         if ((Get-HashOrEmpty (Join-Path $App $f)) -ne (Get-HashOrEmpty (Join-Path $Backup $f))) { return $true }
     }
-    $dataScript = Join-Path $Data 'connect.ps1'
-    if ((Test-Path -LiteralPath $dataScript) -and (Get-HashOrEmpty $dataScript) -ne (Get-HashOrEmpty (Join-Path $Backup 'connect.ps1'))) { return $true }
-    return $false
+    # 설치 전 자기 자신(백업의 data-connect.ps1)과 비교한다. Program Files의 connect.ps1과 비교하면 원래 두 파일이 달랐을 때 바뀐 것으로 잘못 본다.
+    return (Get-HashOrEmpty (Join-Path $Data 'connect.ps1')) -ne (Get-HashOrEmpty (Join-Path $Backup 'data-connect.ps1'))
+}
+
+# install.ps1이 마지막 단계(settings.json에 새 버전 기록)까지 마쳤는지 본다.
+# install.ps1은 Unattended 설정 실패처럼 나머지를 다 설치하고도 1로 끝나는 경우가 있어, 그때는 되돌리지 않는다.
+function Test-InstallCompleted([string]$Data, [string]$NewVersion) {
+    try {
+        $v = (Get-Content -LiteralPath (Join-Path $Data 'settings.json') -Raw -Encoding UTF8 | ConvertFrom-Json).version
+        return [bool]$NewVersion -and "$v" -eq $NewVersion
+    } catch { return $false }
 }
 
 # install.ps1을 새 Windows PowerShell로 실행하고 (종료 코드, 출력 줄)을 돌려준다.
@@ -81,10 +92,13 @@ function Write-Report($m) { Write-Host $m; $lines.Add([string]$m) }
 
 # 새 버전을 설치하고, 실패했는데 파일이 이미 바뀌었으면 백업해 둔 이전 버전의 install.ps1로 다시 설치해
 # 새 파일과 이전 예약 작업이 섞이지 않게 한다. 실패하면 예외를 던진다(메시지에 되돌렸는지 담음).
-function Install-WithRollback([string]$Installer, [string[]]$InstallArgs, [string]$App, [string]$Data, [string]$Backup, [bool]$CanRollback) {
+function Install-WithRollback([string]$Installer, [string[]]$InstallArgs, [string]$App, [string]$Data, [string]$Backup, [bool]$CanRollback, [string]$NewVersion) {
     $r = Invoke-Installer -Installer $Installer -InstallArgs $InstallArgs
     $r.Lines | ForEach-Object { Write-Report "  $_" }
     if ($r.Code -eq 0) { return }
+    if (Test-InstallCompleted -Data $Data -NewVersion $NewVersion) {
+        throw "install.ps1이 새 버전(v$NewVersion) 설치를 마쳤지만 일부 단계가 실패했습니다(종료 코드 $($r.Code)). 위 기록을 확인하세요. 새 버전은 그대로 둡니다."
+    }
     if (-not (Test-InstallChanged -App $App -Backup $Backup -Data $Data)) {
         throw "install.ps1이 실패했습니다 (종료 코드 $($r.Code)). 설치된 파일은 바뀌지 않았습니다."
     }
@@ -191,7 +205,7 @@ try {
 
         # 4) 되돌리기용 백업 (지금 설치된 관리 앱 파일)
         $backup = Join-Path $stage 'previous'
-        $canRollback = Backup-AppFiles -From $appDir -Dest $backup
+        $canRollback = Backup-AppFiles -From $appDir -Dest $backup -Data $dataDir
 
         # 5) 설치 (연결을 끊는 확인 단계는 건너뜀). 기존 설정을 그대로 넘긴다.
         Write-Report "자동 재연결 설정 유지: $reconnect"
@@ -201,7 +215,7 @@ try {
             Write-Report "멈춤 감시 설정 유지: $heal"
         }
         # 6) 실패했는데 파일이 이미 바뀌었으면 이전 버전으로 되돌린다.
-        Install-WithRollback -Installer $installer -InstallArgs $installArgs -App $appDir -Data $dataDir -Backup $backup -CanRollback $canRollback
+        Install-WithRollback -Installer $installer -InstallArgs $installArgs -App $appDir -Data $dataDir -Backup $backup -CanRollback $canRollback -NewVersion ($rel.tag_name.TrimStart('v'))
         Write-Report "업데이트 완료: $($rel.tag_name)"
     }
 } catch {

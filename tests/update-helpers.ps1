@@ -32,7 +32,7 @@ try {
         Set-Content -LiteralPath (Join-Path $data 'connect.ps1') -Value 'old connect.ps1' -Encoding ASCII
     }
     Reset-App
-    Assert-Equal '백업하면 되돌릴 수 있음' (Backup-AppFiles -From $app -Dest $backup) $true
+    Assert-Equal '백업하면 되돌릴 수 있음' (Backup-AppFiles -From $app -Dest $backup -Data $data) $true
     Assert-Equal '바뀐 것 없음'            (Test-InstallChanged -App $app -Backup $backup -Data $data) $false
     Set-Content -LiteralPath (Join-Path $app $appName) -Value 'new exe' -Encoding ASCII
     Assert-Equal '실행 파일이 바뀜'        (Test-InstallChanged -App $app -Backup $backup -Data $data) $true
@@ -40,7 +40,13 @@ try {
     Set-Content -LiteralPath (Join-Path $data 'connect.ps1') -Value 'new connect.ps1' -Encoding ASCII
     Assert-Equal '예약 작업 스크립트가 바뀜' (Test-InstallChanged -App $app -Backup $backup -Data $data) $true
     Reset-App
-    Assert-Equal '실행 파일이 없으면 되돌릴 수 없음' (Backup-AppFiles -From $data -Dest (Join-Path $root 'nobackup')) $false
+    Assert-Equal '실행 파일이 없으면 되돌릴 수 없음' (Backup-AppFiles -From $data -Dest (Join-Path $root 'nobackup') -Data $data) $false
+    # 설치 전부터 두 connect.ps1이 달랐던 경우(Program Files와 ProgramData)는 바뀐 것으로 보지 않는다.
+    $backup2 = Join-Path $root 'stage\previous2'
+    Set-Content -LiteralPath (Join-Path $data 'connect.ps1') -Value 'older data connect.ps1' -Encoding ASCII
+    [void](Backup-AppFiles -From $app -Dest $backup2 -Data $data)
+    Assert-Equal '설치 전부터 달랐던 connect.ps1은 변경 아님' (Test-InstallChanged -App $app -Backup $backup2 -Data $data) $false
+    Reset-App
 
     $newInstaller = Join-Path $pkg 'install.ps1'
 
@@ -50,6 +56,15 @@ try {
     Assert-Equal '도중 실패는 되돌림' ($msg -like '*이전 버전으로 되돌렸습니다*') $true
     Assert-Equal '되돌린 뒤 실행 파일은 이전 것' (Get-Content -LiteralPath (Join-Path $app $appName)) "old $appName"
     Assert-Equal '설치 출력이 보고에 남음' ($lines -contains '  half installed') $true
+
+    # 1-1) 마지막 단계(settings.json 새 버전)까지 마치고 1로 끝남(Unattended 실패 등) → 되돌리지 않음
+    Reset-App
+    $settingsPath = Join-Path $data 'settings.json'
+    Set-Content -LiteralPath $newInstaller -Value "Set-Content -LiteralPath '$(Join-Path $app $appName)' -Value 'new exe' -Encoding ASCII`r`nSet-Content -LiteralPath '$settingsPath' -Value '{ ""version"": ""9.9.9"" }' -Encoding ASCII`r`nexit 1" -Encoding ASCII
+    $msg = try { Install-WithRollback -Installer $newInstaller -InstallArgs @('-NoTest') -App $app -Data $data -Backup $backup -CanRollback $true -NewVersion '9.9.9'; 'no error' } catch { $_.Exception.Message }
+    Assert-Equal '설치를 마친 뒤 실패는 되돌리지 않음' ($msg -like '*새 버전은 그대로 둡니다*') $true
+    Assert-Equal '새 실행 파일 유지' (Get-Content -LiteralPath (Join-Path $app $appName)) 'new exe'
+    Remove-Item -LiteralPath $settingsPath -Force
 
     # 2) 아무것도 바꾸지 않고 실패(로그인 필요 등) → 되돌리지 않음
     Reset-App

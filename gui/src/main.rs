@@ -23,8 +23,11 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const DATA_DIR: &str = r"C:\ProgramData\TailscaleAutoConnect";
 /// 'tailscale status'를 기다리는 최대 시간. 서비스가 멈추면 응답하지 않아 화면이 마지막 상태에 머물렀다.
 const STATUS_TIMEOUT: Duration = Duration::from_secs(10);
-/// 새 버전 확인(PowerShell, 내부 HTTP 제한 15초)과 알림 표시에 기다리는 최대 시간
-const POWERSHELL_TIMEOUT: Duration = Duration::from_secs(45);
+/// 새 버전 확인(PowerShell, 내부 HTTP 제한 15초)을 기다리는 최대 시간
+const UPDATE_CHECK_TIMEOUT: Duration = Duration::from_secs(45);
+/// 알림 한 번(PowerShell)을 기다리는 최대 시간. 알림 작업은 1분 제한이라
+/// 상태 조회(10초) + 알림 두 번(멈춤 복구, 끊김)이 그 안에 끝나도록 짧게 둔다.
+const TOAST_TIMEOUT: Duration = Duration::from_secs(20);
 /// 최근 기록 줄 수. 버튼 줄이 늘어 창 높이에 맞춰 줄였다(9 → 7). 전체 기록은 [로그 폴더 열기]로 본다.
 const LOG_LINES: usize = 7;
 
@@ -938,7 +941,7 @@ fn latest_release_version() -> Option<String> {
             .args(["-NoProfile", "-NonInteractive", "-Command", script])
             // PowerShell 7에서 상속된 모듈 경로가 Windows PowerShell 5.1에 섞이지 않게 한다.
             .env_remove("PSModulePath"),
-        POWERSHELL_TIMEOUT,
+        UPDATE_CHECK_TIMEOUT,
     )
     .ok()?;
     let tag = String::from_utf8_lossy(&out).trim().to_string();
@@ -1149,7 +1152,7 @@ $toast = New-Object Windows.UI.Notifications.ToastNotification $xml\n\
         Command::new("powershell.exe")
             .args(["-NoProfile", "-NonInteractive", "-EncodedCommand", &encode_ps_command(&script)])
             .env_remove("PSModulePath"),
-        POWERSHELL_TIMEOUT,
+        TOAST_TIMEOUT,
     )
     .map(|(s, _)| s.success())
     .unwrap_or(false)
