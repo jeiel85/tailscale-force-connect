@@ -1104,9 +1104,19 @@ fn logon_age(logon: i64, current: i64) -> Option<Duration> {
 }
 
 /// 로그인 직후의 새 버전 확인이면 알림 대신 관리 창을 열지 정한다.
-/// 같은 로그인에서 이미 열었거나, 이 버전을 한 번 자동으로 시도했으면(끝나지 않음) 열지 않는다.
-fn should_offer_window(logon_age: Option<Duration>, offered_this_logon: bool, attempted_same: bool) -> bool {
-    matches!(logon_age, Some(age) if age <= LOGON_OFFER_WINDOW) && !offered_this_logon && !attempted_same
+/// 이 버전을 한 번 자동으로 시도했으면(끝나지 않음) 열지 않는다.
+fn should_offer_window(logon_age: Option<Duration>, attempted_same: bool) -> bool {
+    matches!(logon_age, Some(age) if age <= LOGON_OFFER_WINDOW) && !attempted_same
+}
+
+/// logon-offered.txt에 남기는 값: 같은 로그인에서 같은 버전으로 관리 창을 이미 열었는지 알아보는 데 쓴다.
+fn logon_offer_key(logon_id: i64, version: &str) -> String {
+    format!("{logon_id} {version}")
+}
+
+/// "1분", "90초"처럼 사람이 읽는 시간
+fn seconds_label(secs: i32) -> String {
+    if secs > 0 && secs % 60 == 0 { format!("{}분", secs / 60) } else { format!("{secs}초") }
 }
 
 /// 관리 창이 이미 열려 있는지(창 제목과 winit 창 클래스로 찾는다).
@@ -1118,16 +1128,20 @@ fn manager_window_open() -> bool {
 }
 
 /// 로그인 직후 새 버전을 찾았으면 관리 창을 연다. 창은 열면서 새 버전을 다시 확인하고, AUTO_UPDATE_SECONDS 뒤 자동으로 업데이트한다.
-/// 창을 열었으면(또는 이미 열려 있으면) true. 이 실행은 예약 작업(5분 제한)이라 창은 explorer.exe를 거쳐 따로 띄운다.
+/// 창을 열었으면(또는 이미 열려 있거나, 이 로그인에서 이 버전으로 이미 열었으면) true. 그때는 알림을 띄우지 않는다.
+/// 이 실행은 예약 작업(5분 제한)이라 창은 explorer.exe를 거쳐 따로 띄운다.
 fn offer_window_at_logon(latest: &str) -> bool {
     let logon = session_logon_age();
     let marker = user_state_dir().join("logon-offered.txt");
-    let offered = match logon {
-        Some((id, _)) => std::fs::read_to_string(&marker).map(|s| s.trim() == id.to_string()).unwrap_or(false),
-        None => false,
-    };
+    // 로그인 직후 연 창에서 [나중에]를 눌렀는데 곧이어 매일 12:30 확인이 돌면 같은 내용의 알림이 겹치므로 건너뛴다.
+    // 버전을 함께 남기므로, 로그아웃 없이 며칠 쓰는 동안 나온 다음 버전은 평소처럼 알린다.
+    if let Some((id, _)) = logon {
+        if std::fs::read_to_string(&marker).is_ok_and(|s| s.trim() == logon_offer_key(id, latest)) {
+            return true;
+        }
+    }
     let attempted_same = update_offer(false, latest, auto_attempted_version().as_deref()).0 == 0;
-    if !should_offer_window(logon.map(|(_, age)| age), offered, attempted_same) {
+    if !should_offer_window(logon.map(|(_, age)| age), attempted_same) {
         return false;
     }
     if manager_window_open() {
@@ -1139,7 +1153,7 @@ fn offer_window_at_logon(latest: &str) -> bool {
     }
     if let Some((id, _)) = logon {
         let _ = std::fs::create_dir_all(user_state_dir());
-        let _ = std::fs::write(&marker, id.to_string());
+        let _ = std::fs::write(&marker, logon_offer_key(id, latest));
     }
     true
 }
@@ -1287,11 +1301,14 @@ fn notify_if_update_available() {
     }
     let (countdown, _) = update_offer(false, &latest, auto_attempted_version().as_deref());
     let body = if countdown > 0 {
-        "Tailscale Force Connect를 업데이트할 수 있습니다. 누르면 관리 창이 열리고, 1분 뒤 자동으로 업데이트합니다."
+        format!(
+            "Tailscale Force Connect를 업데이트할 수 있습니다. 누르면 관리 창이 열리고, {} 뒤 자동으로 업데이트합니다.",
+            seconds_label(countdown)
+        )
     } else {
-        "Tailscale Force Connect를 업데이트할 수 있습니다. 누르면 관리 창이 열리고 바로 업데이트할 수 있습니다."
+        "Tailscale Force Connect를 업데이트할 수 있습니다. 누르면 관리 창이 열리고 바로 업데이트할 수 있습니다.".to_string()
     };
-    if show_toast(&format!("새 버전 v{latest}"), body) {
+    if show_toast(&format!("새 버전 v{latest}"), &body) {
         let _ = std::fs::create_dir_all(&state_dir);
         let _ = std::fs::write(&marker, &latest);
     }
@@ -1398,12 +1415,17 @@ mod tests {
     #[test]
     fn logon_offer_window() {
         let min = |m: u64| Some(Duration::from_secs(m * 60));
-        assert!(should_offer_window(min(2), false, false));
-        assert!(should_offer_window(min(10), false, false));
-        assert!(!should_offer_window(min(11), false, false), "매일 확인처럼 로그인한 지 오래면 알림만");
-        assert!(!should_offer_window(None, false, false), "로그인 시각을 모르면 알림만");
-        assert!(!should_offer_window(min(2), true, false), "같은 로그인에서 두 번 열지 않음");
-        assert!(!should_offer_window(min(2), false, true), "이미 자동으로 시도한 버전");
+        assert!(should_offer_window(min(2), false));
+        assert!(should_offer_window(min(10), false));
+        assert!(!should_offer_window(min(11), false), "매일 확인처럼 로그인한 지 오래면 알림만");
+        assert!(!should_offer_window(None, false), "로그인 시각을 모르면 알림만");
+        assert!(!should_offer_window(min(2), true), "이미 자동으로 시도한 버전");
+        // 같은 로그인·같은 버전일 때만 같은 값(다음 버전은 다시 알림)
+        assert_eq!(logon_offer_key(134, "1.9.1"), "134 1.9.1");
+        assert_ne!(logon_offer_key(134, "1.9.1"), logon_offer_key(134, "1.9.2"));
+        assert_eq!(seconds_label(60), "1분");
+        assert_eq!(seconds_label(90), "90초");
+        assert_eq!(seconds_label(30), "30초");
         // FILETIME(100ns) 차이 → 시간
         assert_eq!(logon_age(1_000_000_000, 1_000_000_000 + 1_200_000_000), Some(Duration::from_secs(120)));
         assert_eq!(logon_age(0, 5), None);
