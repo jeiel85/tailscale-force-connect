@@ -30,6 +30,12 @@ const UPDATE_CHECK_TIMEOUT: Duration = Duration::from_secs(45);
 const TOAST_TIMEOUT: Duration = Duration::from_secs(20);
 /// 최근 기록 줄 수. 칸 안에서 스크롤되므로 창 높이와 상관없다. 전체 기록은 [로그 폴더 열기]로 본다.
 const LOG_LINES: usize = 40;
+/// 새 버전 알림 창이 저절로 떴을 때 자동으로 업데이트하기까지 기다리는 시간(초).
+/// 내용을 읽거나 [나중에]를 누를 시간은 주고, 아무도 없으면 그대로 진행되게 한다(홈베이스·claude-usage와 같은 값).
+const AUTO_UPDATE_SECONDS: i32 = 60;
+/// 로그인한 지 이 시간 안에 새 버전 확인(로그인 2분 뒤 트리거)이 새 버전을 찾으면 알림 대신 관리 창을 연다.
+/// 매일 12:30 확인처럼 작업 중에 도는 확인은 화면을 가로채지 않고 알림만 띄운다.
+const LOGON_OFFER_WINDOW: Duration = Duration::from_secs(10 * 60);
 
 /// 콤보 상자 항목 순서와 같다: (install.ps1 -ReconnectAfter 값, 분)
 const RECONNECT: [(&str, i64); 5] = [("0", 0), ("30m", 30), ("1h", 60), ("2h", 120), ("4h", 240)];
@@ -354,6 +360,7 @@ fn main() -> Result<(), slint::PlatformError> {
 
     // 새 버전 확인. 설치된 관리 창(Program Files)은 열 때 자동으로 확인하고(실패하면 조용히 넘어감),
     // 머리글의 버전 표시를 누르면 어디서든 수동으로 확인한다. 새 버전이 있으면 알림 창을 띄운다.
+    // 열 때 확인해서 뜬 알림 창은 AUTO_UPDATE_SECONDS 뒤 자동으로 업데이트한다(update_offer 참고).
     let checking = Arc::new(AtomicBool::new(false));
     let check_update = {
         let weak = ui.as_weak();
@@ -371,12 +378,17 @@ fn main() -> Result<(), slint::PlatformError> {
             let checking = checking.clone();
             std::thread::spawn(move || {
                 let latest = latest_release_version();
+                let attempted = auto_attempted_version();
                 checking.store(false, Ordering::SeqCst);
                 let _ = weak.upgrade_in_event_loop(move |ui| match latest {
                     Some(v) if is_newer(&v, env!("CARGO_PKG_VERSION")) => {
+                        let (countdown, note) = update_offer(manual, &v, attempted.as_deref());
                         ui.set_update_status(format!("새 버전 v{v}").into());
                         ui.set_update_version(v.into());
                         ui.set_update_available(true);
+                        ui.set_update_countdown_total(countdown.max(1));
+                        ui.set_update_countdown(countdown);
+                        ui.set_update_note(note.into());
                         ui.set_show_update_prompt(true);
                     }
                     Some(_) => {
@@ -400,17 +412,39 @@ fn main() -> Result<(), slint::PlatformError> {
         let check = check_update.clone();
         ui.on_check_update(move || check(true));
     }
-    {
+    // [업데이트]·[지금 업데이트]를 누르거나(auto=false), 알림 창의 카운트다운이 끝나면(auto=true) update.ps1을 UAC로 실행한다.
+    let start_update = {
         let weak = ui.as_weak();
-        ui.on_update(move || {
+        Arc::new(move |auto: bool| {
             let Some(ui) = weak.upgrade() else { return };
             let Some(script) = sibling("update.ps1") else {
                 show_result(&ui, false, "업데이트 스크립트를 찾지 못했습니다", "update.ps1이 이 실행 파일과 같은 폴더에 있어야 합니다. 한 줄 설치로 다시 설치하세요.");
                 return;
             };
+            if auto {
+                let version = ui.get_update_version().to_string();
+                // 창을 열 때 읽은 기록은 낡았을 수 있다(관리 창 두 개가 각각 세던 중 다른 창이 먼저 시작함). 지금 다시 읽어,
+                // 이미 이 버전을 자동으로 시작했으면 또 승인 창을 띄우지 않고 버튼을 기다린다.
+                let (countdown, note) = update_offer(false, &version, auto_attempted_version().as_deref());
+                if countdown == 0 {
+                    ui.set_update_countdown(0);
+                    ui.set_update_note(note.into());
+                    ui.set_show_update_prompt(true);
+                    return;
+                }
+                // 승인 창에서 멈추거나 실패해도 같은 버전을 다음에 또 자동으로 시작하지 않도록, 시작하기 전에 남긴다.
+                record_auto_attempt(&version);
+            }
             ui.set_result_visible(false);
             ui.set_busy(true);
-            ui.set_busy_text("관리자 권한 창에서 [예]를 누르세요. 업데이트가 시작되면 이 창은 닫히고, 끝나면 새 버전으로 다시 열립니다.".into());
+            ui.set_busy_text(
+                if auto {
+                    "자동으로 업데이트를 시작합니다. 관리자 권한 창에서 [예]를 누르세요. 업데이트가 시작되면 이 창은 닫히고, 끝나면 새 버전으로 다시 열립니다."
+                } else {
+                    "관리자 권한 창에서 [예]를 누르세요. 업데이트가 시작되면 이 창은 닫히고, 끝나면 새 버전으로 다시 열립니다."
+                }
+                .into(),
+            );
             let weak = weak.clone();
             std::thread::spawn(move || {
                 // 업데이트가 이 실행 파일을 바꿔야 하므로 기다리지 않고 창을 닫는다. 실패하면 스크립트가 메시지 상자로 알린다.
@@ -425,7 +459,15 @@ fn main() -> Result<(), slint::PlatformError> {
                     }
                 });
             });
-        });
+        })
+    };
+    {
+        let start = start_update.clone();
+        ui.on_update(move || start(false));
+    }
+    {
+        let start = start_update.clone();
+        ui.on_auto_update(move || start(true));
     }
 
     // [Tailscale 다시 시작]: 이 실행 파일과 같은 폴더(설치된 경우 Program Files)의 connect.ps1 -Heal을 관리자 권한으로 실행한다.
@@ -976,8 +1018,12 @@ fn latest_release_version() -> Option<String> {
     parse_version(&v).map(|_| v)
 }
 
-/// 사용자별 알림 기록을 두는 폴더 (%LOCALAPPDATA%\Tailscale Force Connect)
+/// 사용자별 알림 기록을 두는 폴더 (%LOCALAPPDATA%\Tailscale Force Connect). 개발 빌드에서는 TFC_STATE_DIR로 바꾼다.
 fn user_state_dir() -> PathBuf {
+    #[cfg(debug_assertions)]
+    if let Some(dir) = std::env::var_os("TFC_STATE_DIR") {
+        return PathBuf::from(dir);
+    }
     std::env::var_os("LOCALAPPDATA")
         .map(PathBuf::from)
         .unwrap_or_else(std::env::temp_dir)
@@ -1005,6 +1051,121 @@ fn set_notifications_enabled(on: bool) -> std::io::Result<()> {
         std::fs::create_dir_all(user_state_dir())?;
         std::fs::write(&marker, "Windows 알림을 끈 표시입니다. 관리 창에서 다시 켜면 지워집니다.")
     }
+}
+
+/// 카운트다운이 끝나 자동으로 업데이트를 시작한 버전. 그 업데이트가 끝나지 않았으면(승인 창 거절·방치, 설치 실패)
+/// 같은 버전은 다시 자동으로 시작하지 않고 버튼을 기다린다(승인 창이 되풀이해 뜨지 않도록).
+/// 업데이트가 되면 현재 버전이 이 값과 같아져 더 이상 쓰이지 않는다.
+fn auto_attempt_marker() -> PathBuf {
+    user_state_dir().join("auto-update-attempted.txt")
+}
+
+fn auto_attempted_version() -> Option<String> {
+    std::fs::read_to_string(auto_attempt_marker()).ok().map(|s| s.trim().to_string())
+}
+
+fn record_auto_attempt(version: &str) {
+    let _ = std::fs::create_dir_all(user_state_dir());
+    let _ = std::fs::write(auto_attempt_marker(), version);
+}
+
+/// 새 버전 알림 창의 (자동 업데이트까지 남은 초, 안내 문구). 초가 0이면 버튼을 기다린다.
+/// - 머리글의 버전 표시를 눌러 직접 확인한 경우는 이미 화면 앞에 있으므로 세지 않는다.
+/// - 같은 버전을 이미 한 번 자동으로 시작했는데 아직 그 버전이 아니면, 끝나지 않은 것이므로 세지 않고 그 사실을 알린다.
+fn update_offer(manual: bool, latest: &str, attempted: Option<&str>) -> (i32, String) {
+    if manual {
+        return (0, String::new());
+    }
+    if attempted.is_some_and(|a| a.trim_start_matches('v') == latest.trim_start_matches('v')) {
+        return (
+            0,
+            "이 버전은 한 번 자동으로 업데이트를 시작했지만 끝나지 않았습니다(관리자 권한 창을 거절했거나 설치 실패). [지금 업데이트]를 눌러 주세요.".into(),
+        );
+    }
+    (AUTO_UPDATE_SECONDS, String::new())
+}
+
+/// 지금 로그인 세션이 시작된 뒤 지난 시간. 알 수 없으면 None(그때는 알림만 띄운다).
+fn session_logon_age() -> Option<(i64, Duration)> {
+    use windows_sys::Win32::System::RemoteDesktop::{
+        WTS_CURRENT_SERVER_HANDLE, WTS_CURRENT_SESSION, WTSFreeMemory, WTSINFOW, WTSQuerySessionInformationW, WTSSessionInfo,
+    };
+    let mut buf: windows_sys::core::PWSTR = std::ptr::null_mut();
+    let mut len: u32 = 0;
+    let ok = unsafe { WTSQuerySessionInformationW(WTS_CURRENT_SERVER_HANDLE, WTS_CURRENT_SESSION, WTSSessionInfo, &mut buf, &mut len) };
+    if ok == 0 || buf.is_null() {
+        return None;
+    }
+    // LogonTime·CurrentTime은 같은 기준(100ns 단위 FILETIME)이라 빼기만 하면 된다.
+    let times = (len as usize >= std::mem::size_of::<WTSINFOW>()).then(|| {
+        let info = unsafe { std::ptr::read_unaligned(buf as *const WTSINFOW) };
+        (info.LogonTime, info.CurrentTime)
+    });
+    unsafe { WTSFreeMemory(buf.cast()) };
+    let (logon, current) = times?;
+    logon_age(logon, current).map(|age| (logon, age))
+}
+
+fn logon_age(logon: i64, current: i64) -> Option<Duration> {
+    if logon <= 0 || current < logon {
+        return None;
+    }
+    Some(Duration::from_millis(((current - logon) / 10_000) as u64))
+}
+
+/// 로그인 직후의 새 버전 확인이면 알림 대신 관리 창을 열지 정한다.
+/// 이 버전을 한 번 자동으로 시도했으면(끝나지 않음) 열지 않는다.
+fn should_offer_window(logon_age: Option<Duration>, attempted_same: bool) -> bool {
+    matches!(logon_age, Some(age) if age <= LOGON_OFFER_WINDOW) && !attempted_same
+}
+
+/// logon-offered.txt에 남기는 값: 같은 로그인에서 같은 버전으로 관리 창을 이미 열었는지 알아보는 데 쓴다.
+fn logon_offer_key(logon_id: i64, version: &str) -> String {
+    format!("{logon_id} {version}")
+}
+
+/// "1분", "90초"처럼 사람이 읽는 시간
+fn seconds_label(secs: i32) -> String {
+    if secs > 0 && secs % 60 == 0 { format!("{}분", secs / 60) } else { format!("{secs}초") }
+}
+
+/// 관리 창이 이미 열려 있는지(창 제목과 winit 창 클래스로 찾는다).
+fn manager_window_open() -> bool {
+    use windows_sys::Win32::UI::WindowsAndMessaging::FindWindowW;
+    let class = wide("Window Class");
+    let title = wide("Tailscale Force Connect");
+    !unsafe { FindWindowW(class.as_ptr(), title.as_ptr()) }.is_null()
+}
+
+/// 로그인 직후 새 버전을 찾았으면 관리 창을 연다. 창은 열면서 새 버전을 다시 확인하고, AUTO_UPDATE_SECONDS 뒤 자동으로 업데이트한다.
+/// 창을 열었으면(또는 이미 열려 있거나, 이 로그인에서 이 버전으로 이미 열었으면) true. 그때는 알림을 띄우지 않는다.
+/// 이 실행은 예약 작업(5분 제한)이라 창은 explorer.exe를 거쳐 따로 띄운다.
+fn offer_window_at_logon(latest: &str) -> bool {
+    let logon = session_logon_age();
+    let marker = user_state_dir().join("logon-offered.txt");
+    // 로그인 직후 연 창에서 [나중에]를 눌렀는데 곧이어 매일 12:30 확인이 돌면 같은 내용의 알림이 겹치므로 건너뛴다.
+    // 버전을 함께 남기므로, 로그아웃 없이 며칠 쓰는 동안 나온 다음 버전은 평소처럼 알린다.
+    if let Some((id, _)) = logon {
+        if std::fs::read_to_string(&marker).is_ok_and(|s| s.trim() == logon_offer_key(id, latest)) {
+            return true;
+        }
+    }
+    let attempted_same = update_offer(false, latest, auto_attempted_version().as_deref()).0 == 0;
+    if !should_offer_window(logon.map(|(_, age)| age), attempted_same) {
+        return false;
+    }
+    if manager_window_open() {
+        return true; // 열 때 이미 확인했다
+    }
+    let Ok(exe) = std::env::current_exe() else { return false };
+    if Command::new("explorer.exe").arg(exe).spawn().is_err() {
+        return false;
+    }
+    if let Some((id, _)) = logon {
+        let _ = std::fs::create_dir_all(user_state_dir());
+        let _ = std::fs::write(&marker, logon_offer_key(id, latest));
+    }
+    true
 }
 
 /// 설치 폴더의 JSON 파일(settings.json, heal-last.json). PowerShell 5.1이 붙이는 BOM은 떼고 읽는다.
@@ -1129,7 +1290,9 @@ fn heal_toast_text(outcome: &str, minutes: i64) -> (String, String) {
     }
 }
 
-/// 새 버전이 있고 그 버전을 아직 알리지 않았으면 Windows 알림을 띄운다. 같은 버전은 한 번만 알린다.
+/// 예약 작업 'Tailscale Force Connect Update Check'(로그인 2분 뒤, 매일 12:30)가 --notify-update로 실행한다.
+/// 새 버전이 있으면, 로그인 직후에는 관리 창을 열어 1분 뒤 자동으로 업데이트하고(로그인마다),
+/// 그 밖에는 Windows 알림을 띄운다(같은 버전은 한 번만).
 fn notify_if_update_available() {
     if !notifications_enabled() {
         return; // 관리 창에서 알림을 껐다(새 버전은 관리 창을 열면 보인다)
@@ -1138,15 +1301,24 @@ fn notify_if_update_available() {
     if !is_newer(&latest, env!("CARGO_PKG_VERSION")) {
         return;
     }
+    if offer_window_at_logon(&latest) {
+        return;
+    }
     let state_dir = user_state_dir();
     let marker = state_dir.join("notified-version.txt");
     if std::fs::read_to_string(&marker).map(|s| s.trim() == latest).unwrap_or(false) {
         return;
     }
-    if show_toast(
-        &format!("새 버전 v{latest}"),
-        "Tailscale Force Connect를 업데이트할 수 있습니다. 누르면 관리 창이 열리고 바로 업데이트할 수 있습니다.",
-    ) {
+    let (countdown, _) = update_offer(false, &latest, auto_attempted_version().as_deref());
+    let body = if countdown > 0 {
+        format!(
+            "Tailscale Force Connect를 업데이트할 수 있습니다. 누르면 관리 창이 열리고, {} 뒤 자동으로 업데이트합니다.",
+            seconds_label(countdown)
+        )
+    } else {
+        "Tailscale Force Connect를 업데이트할 수 있습니다. 누르면 관리 창이 열리고 바로 업데이트할 수 있습니다.".to_string()
+    };
+    if show_toast(&format!("새 버전 v{latest}"), &body) {
         let _ = std::fs::create_dir_all(&state_dir);
         let _ = std::fs::write(&marker, &latest);
     }
@@ -1233,6 +1405,47 @@ mod tests {
         assert!(!is_newer("1.4.0-beta", "1.3.0"));
         assert!(!is_newer("garbage", "1.3.0"));
         assert!(!is_newer("1.4", "1.3.0"));
+    }
+
+    #[test]
+    fn auto_update_offer() {
+        // 열 때 확인해서 뜬 알림 창은 세고, 직접 확인은 세지 않는다
+        assert_eq!(update_offer(false, "1.9.0", None), (AUTO_UPDATE_SECONDS, String::new()));
+        assert_eq!(update_offer(true, "1.9.0", None), (0, String::new()));
+        // 다른 버전을 시도했던 기록은 상관없다
+        assert_eq!(update_offer(false, "1.9.0", Some("1.8.1")).0, AUTO_UPDATE_SECONDS);
+        // 같은 버전을 이미 자동으로 시작했는데 아직이면 버튼을 기다리고 이유를 보여 준다
+        let (secs, note) = update_offer(false, "1.9.0", Some("1.9.0"));
+        assert_eq!(secs, 0);
+        assert!(note.contains("끝나지 않았습니다"), "{note}");
+        assert_eq!(update_offer(false, "1.9.0", Some("v1.9.0")).0, 0);
+        assert_eq!(update_offer(true, "1.9.0", Some("1.9.0")), (0, String::new()));
+    }
+
+    #[test]
+    fn logon_offer_window() {
+        let min = |m: u64| Some(Duration::from_secs(m * 60));
+        assert!(should_offer_window(min(2), false));
+        assert!(should_offer_window(min(10), false));
+        assert!(!should_offer_window(min(11), false), "매일 확인처럼 로그인한 지 오래면 알림만");
+        assert!(!should_offer_window(None, false), "로그인 시각을 모르면 알림만");
+        assert!(!should_offer_window(min(2), true), "이미 자동으로 시도한 버전");
+        // 같은 로그인·같은 버전일 때만 같은 값(다음 버전은 다시 알림)
+        assert_eq!(logon_offer_key(134, "1.9.1"), "134 1.9.1");
+        assert_ne!(logon_offer_key(134, "1.9.1"), logon_offer_key(134, "1.9.2"));
+        assert_eq!(seconds_label(60), "1분");
+        assert_eq!(seconds_label(90), "90초");
+        assert_eq!(seconds_label(30), "30초");
+        // FILETIME(100ns) 차이 → 시간
+        assert_eq!(logon_age(1_000_000_000, 1_000_000_000 + 1_200_000_000), Some(Duration::from_secs(120)));
+        assert_eq!(logon_age(0, 5), None);
+        assert_eq!(logon_age(10, 5), None);
+        // 이 PC의 실제 세션: 읽을 수 있으면 로그인한 지 지난 시간이 나온다
+        let session = session_logon_age();
+        eprintln!("session logon: {session:?}");
+        if let Some((id, age)) = session {
+            assert!(id > 0 && age < Duration::from_secs(400 * 24 * 3600), "{id} {age:?}");
+        }
     }
 
     #[test]

@@ -12,13 +12,13 @@ $taskName    = 'Tailscale Auto Connect'
 $eventSource = 'TailscaleForceConnect'
 $logFile     = Join-Path $dir 'install.log'
 $watchTask   = 'Tailscale Auto Reconnect'
-$version     = '1.8.0'
+$version     = '1.9.0'
 $appDir      = Join-Path $env:ProgramFiles 'Tailscale Force Connect'   # 관리 앱(GUI)과 스크립트 원본
 $appExe      = 'TailscaleForceConnect.exe'
 $shortcut    = Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu\Programs\Tailscale Force Connect.lnk'
 $appId       = 'TailscaleForceConnect.Manager'          # Windows 알림의 앱 ID (시작 메뉴 바로가기에 기록)
 $protocol    = 'tailscale-force-connect'                # 알림을 누르면 관리 창을 여는 링크
-$notifyTask  = 'Tailscale Force Connect Update Check'   # 로그인할 때·매일 새 버전을 확인해 알림 (사용자 권한)
+$notifyTask  = 'Tailscale Force Connect Update Check'   # 로그인할 때·매일 새 버전을 확인해 관리 창·알림으로 알림 (사용자 권한)
 $alertTask   = 'Tailscale Force Connect Status Alert'   # 1분마다 연결 상태를 보고 끊김·재연결을 알림 (사용자 권한)
 
 # 시간 값은 30m, 1h, 1h30m처럼 h·m 단위로 받는다. 0(또는 off)이면 끈다. 올바르지 않으면 $null.
@@ -296,8 +296,8 @@ try {
         $nDaily     = New-ScheduledTaskTrigger -Daily -At '12:30'
         $nPrincipal = New-ScheduledTaskPrincipal -GroupId 'S-1-5-32-545' -RunLevel Limited   # Users: 로그인한 사용자로 실행
         $nSettings  = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Minutes 5) -MultipleInstances IgnoreNew
-        Register-ScheduledTask -TaskName $notifyTask -Action $nAction -Trigger @($nLogon, $nDaily) -Principal $nPrincipal -Settings $nSettings -Description '새 버전이 있으면 Windows 알림으로 알린다. 업데이트는 알림을 눌러 관리 창에서 한다.' -Force | Out-Null
-        Write-Report "새 버전 알림: 로그인할 때와 매일 12:30에 확인 (예약 작업 $notifyTask)"
+        Register-ScheduledTask -TaskName $notifyTask -Action $nAction -Trigger @($nLogon, $nDaily) -Principal $nPrincipal -Settings $nSettings -Description '새 버전이 있으면 로그인 직후에는 관리 창을 열어 1분 뒤 자동으로 업데이트하고(관리자 권한 승인 필요), 그 밖에는 Windows 알림으로 알린다.' -Force | Out-Null
+        Write-Report "새 버전 확인: 로그인 2분 뒤(관리 창을 열어 1분 뒤 자동 업데이트)와 매일 12:30(알림) (예약 작업 $notifyTask)"
 
         # 연결 끊김·재연결 알림: 로그인한 사용자 권한으로 1분마다 상태만 확인한다(창 없음, 상주 프로세스 없음).
         # 시간 기준 반복 트리거는 재부팅 뒤에도 이어지고, 로그인해 있는 동안에만 실행된다.
