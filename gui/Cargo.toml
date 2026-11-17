@@ -1,6 +1,6 @@
 [package]
 name = "tailscale-force-connect"
-version = "1.8.0"
+version = "1.9.0"
 edition = "2024"
 license = "MIT"
 description = "Management window for tailscale-force-connect"
@@ -21,6 +21,7 @@ windows-sys = { version = "0.61.2", features = [
     "Win32_UI_WindowsAndMessaging",
     "Win32_System_Threading",
     "Win32_System_Registry",
+    "Win32_System_RemoteDesktop",
 ] }
 
 [build-dependencies]
