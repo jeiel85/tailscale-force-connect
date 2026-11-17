@@ -422,8 +422,18 @@ fn main() -> Result<(), slint::PlatformError> {
                 return;
             };
             if auto {
+                let version = ui.get_update_version().to_string();
+                // 창을 열 때 읽은 기록은 낡았을 수 있다(관리 창 두 개가 각각 세던 중 다른 창이 먼저 시작함). 지금 다시 읽어,
+                // 이미 이 버전을 자동으로 시작했으면 또 승인 창을 띄우지 않고 버튼을 기다린다.
+                let (countdown, note) = update_offer(false, &version, auto_attempted_version().as_deref());
+                if countdown == 0 {
+                    ui.set_update_countdown(0);
+                    ui.set_update_note(note.into());
+                    ui.set_show_update_prompt(true);
+                    return;
+                }
                 // 승인 창에서 멈추거나 실패해도 같은 버전을 다음에 또 자동으로 시작하지 않도록, 시작하기 전에 남긴다.
-                record_auto_attempt(&ui.get_update_version());
+                record_auto_attempt(&version);
             }
             ui.set_result_visible(false);
             ui.set_busy(true);
