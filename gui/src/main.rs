@@ -125,6 +125,10 @@ struct Snapshot {
     watch_at: Option<u64>,
     /// 직접 끊은 상태를 감시 작업이 처음 본 뒤 지난 분
     stopped_for: Option<i64>,
+    /// 켜진 직후·설치 직후·깨어난 직후라 감시 작업이 아직 돌지 않았을 수 있음
+    watch_settling: bool,
+    /// 이 사용자가 트레이 아이콘을 켜 두었는지
+    tray_on: bool,
 }
 
 /// Windows 알림의 앱 ID. install.ps1이 시작 메뉴 바로가기에 같은 값을 기록한다.
@@ -635,10 +639,12 @@ fn apply_snapshot(ui: &AppWindow, s: &Snapshot, state: &UiState) {
         state.watch_at.store(at, Ordering::SeqCst);
     }
     let watch_at = Some(state.watch_at.load(Ordering::SeqCst)).filter(|at| *at > 0);
-    let health = watch_health(s.watch_interval, watch_at, unix_now(), just_started(s.watch_interval));
+    let health = watch_health(s.watch_interval, watch_at, unix_now(), s.watch_settling);
     let (watch_text, watch_tone) = watch_window_text(&health, s.watch_interval);
     ui.set_watch_text(watch_text.into());
     ui.set_watch_tone(watch_tone);
+    // 트레이 메뉴에서 끈 것도 반영한다(그대로 두면 다시 켜려고 두 번 눌러야 한다).
+    ui.set_tray_on(s.tray_on);
     if let Ok(mut peers) = state.active_peers.lock() {
         peers.clone_from(&s.active_peers);
     }
@@ -684,6 +690,11 @@ fn minutes_label(m: i64) -> String {
 }
 
 fn collect_snapshot() -> Snapshot {
+    collect_snapshot_for(true)
+}
+
+/// window가 false면(트레이) 관리 창에만 보이는 최근 기록과 빠른 시작 설정은 읽지 않는다(15초마다 읽으므로).
+fn collect_snapshot_for(window: bool) -> Snapshot {
     let data = data_dir();
     let installed = data.join("connect.ps1").exists();
 
@@ -714,6 +725,7 @@ fn collect_snapshot() -> Snapshot {
         },
     };
 
+    let watch_interval = if installed && settings_found { watch_interval_minutes(reconnect_minutes, heal_active) } else { None };
     Snapshot {
         installed,
         settings_found,
@@ -723,12 +735,14 @@ fn collect_snapshot() -> Snapshot {
         state,
         title,
         detail,
-        log: read_log_tail(&data.join("connect.log")),
-        fast_startup: fast_startup_enabled(),
+        log: if window { read_log_tail(&data.join("connect.log")) } else { None },
+        fast_startup: window && fast_startup_enabled(),
         active_peers,
-        watch_interval: if installed && settings_found { watch_interval_minutes(reconnect_minutes, heal_active) } else { None },
+        watch_interval,
         watch_at: read_data_json("watch-last.json").and_then(|v| v.get("at")?.as_u64()),
         stopped_for: stopped_for_minutes(),
+        watch_settling: just_started(watch_interval),
+        tray_on: tray_enabled(),
     }
 }
 
@@ -1466,10 +1480,14 @@ fn watch_interval_minutes(reconnect: i64, heal: i64) -> Option<i64> {
     Some(if heal > 0 || reconnect < 10 { 1 } else { 5 })
 }
 
-/// 마지막 확인 뒤 이만큼(초) 지나면 감시 작업이 멈춘 것으로 본다. 확인 주기의 세 배에 2분을 더한다.
-/// 서비스 재시작(최대 2분)이 든 실행 중에는 다음 실행을 건너뛰므로 한두 번은 빠질 수 있다.
+/// 감시 작업 한 번의 실행 제한(분). install.ps1의 ExecutionTimeLimit과 같다.
+const WATCH_RUN_LIMIT_MINUTES: i64 = 4;
+
+/// 마지막 확인 뒤 이만큼(초) 지나면 감시 작업이 멈춘 것으로 본다: 세 번 거른 시간과
+/// '실행 제한까지 걸린 한 번(그동안의 실행은 건너뜀) + 다음 주기' 중 긴 쪽에 2분을 더한다. 1분 주기는 7분, 5분 주기는 17분.
 fn watch_stale_after(interval: i64) -> u64 {
-    (interval.max(1) * 3 + 2) as u64 * 60
+    let interval = interval.max(1);
+    ((interval * 3).max(WATCH_RUN_LIMIT_MINUTES + interval) + 2) as u64 * 60
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1503,7 +1521,7 @@ fn unix_now() -> u64 {
     SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
-/// 켜진 직후나 설치·업데이트 직후에는 감시 작업이 아직 한 번도 돌지 않았을 수 있다
+/// 켜진 직후나 설치·업데이트 직후, 절전에서 깨어난 직후에는 감시 작업이 아직 돌지 않았을 수 있다
 /// (작업은 부팅 뒤, 설치하고 1분 뒤부터 돈다). 설치 시각은 install.ps1이 매번 새로 쓰는 settings.json의 수정 시각으로 본다.
 fn just_started(interval: Option<i64>) -> bool {
     use windows_sys::Win32::System::SystemInformation::GetTickCount64;
@@ -1514,7 +1532,24 @@ fn just_started(interval: Option<i64>) -> bool {
         .and_then(|m| m.modified())
         .ok()
         .and_then(|t| SystemTime::now().duration_since(t).ok());
-    uptime < wait || since_install.is_some_and(|d| d < wait)
+    uptime < wait || since_install.is_some_and(|d| d < wait) || since_last_wake().is_some_and(|d| d < wait)
+}
+
+/// 절전·최대 절전에서 마지막으로 깨어난 뒤 지난 시간. 깨어난 적이 없으면 None.
+fn since_last_wake() -> Option<Duration> {
+    use windows_sys::Win32::System::{
+        Power::{CallNtPowerInformation, LastWakeTime},
+        SystemInformation::GetTickCount64,
+    };
+    let mut wake: u64 = 0; // 깨어난 때의 인터럽트 시간(100ns 단위, 절전 시간 포함). GetTickCount64와 같은 기준이다
+    let status = unsafe {
+        CallNtPowerInformation(LastWakeTime, std::ptr::null(), 0, (&raw mut wake).cast(), size_of::<u64>() as u32)
+    };
+    if status != 0 || wake == 0 {
+        return None;
+    }
+    let now = unsafe { GetTickCount64() }.saturating_mul(10_000);
+    Some(Duration::from_nanos(now.saturating_sub(wake).saturating_mul(100)))
 }
 
 /// "45초", "12분", "3시간", "2일"
@@ -1623,11 +1658,30 @@ fn tray_running() -> bool {
     true
 }
 
+/// UAC로 권한을 올려 실행 중인지(같은 사용자의 일반 권한 토큰이 따로 있음).
+/// UAC를 끈 PC나 기본 Administrator 계정은 모든 프로세스가 관리자 권한이라 여기에 해당하지 않는다.
+fn elevated_by_uac() -> bool {
+    use windows_sys::Win32::{
+        Security::{GetTokenInformation, TOKEN_ELEVATION_TYPE, TOKEN_QUERY, TokenElevationType, TokenElevationTypeFull},
+        System::Threading::{GetCurrentProcess, OpenProcessToken},
+    };
+    let mut token = std::ptr::null_mut();
+    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
+        return false;
+    }
+    let token = OwnedHandle(token);
+    let mut kind: TOKEN_ELEVATION_TYPE = 0;
+    let mut len = 0u32;
+    let ok = unsafe {
+        GetTokenInformation(token.0, TokenElevationType, (&raw mut kind).cast(), size_of::<TOKEN_ELEVATION_TYPE>() as u32, &mut len)
+    };
+    ok != 0 && kind == TokenElevationTypeFull
+}
+
 /// 트레이를 켜 두었는데 떠 있지 않으면 띄운다. 겹쳐 띄워도 나중 것은 바로 끝난다.
-/// 관리자 권한으로 연 관리 창에서는 띄우지 않는다(트레이가 관리자 권한으로 상주하고, 일반 트레이도 막는다).
+/// UAC로 권한을 올려 연 관리 창에서는 띄우지 않는다(트레이가 관리자 권한으로 상주하고, 일반 트레이도 막는다).
 fn ensure_tray_running() {
-    use windows_sys::Win32::UI::Shell::IsUserAnAdmin;
-    if !tray_enabled() || tray_running() || unsafe { IsUserAnAdmin() } != 0 {
+    if !tray_enabled() || tray_running() || elevated_by_uac() {
         return;
     }
     let Ok(exe) = std::env::current_exe() else { return };
@@ -1867,8 +1921,10 @@ fn new_status_tray(view: &TrayView) -> Result<StatusTray, slint::PlatformError> 
     tray.set_watch_line(view.watch_line.clone().into());
     tray.on_open_window(open_manager_window);
     tray.on_turn_off(|| {
-        let _ = set_tray_enabled(false);
-        let _ = slint::quit_event_loop();
+        // 끈 표시를 남기지 못했으면 알림 작업이 1분 안에 다시 띄우므로, 끄지 않고 남는다(관리 창에서 끄면 이유를 보여 준다).
+        if set_tray_enabled(false).is_ok() {
+            let _ = slint::quit_event_loop();
+        }
     });
     tray.show()?;
     Ok(tray)
@@ -1880,12 +1936,13 @@ fn apply_tray_view(view: TrayView, taskbar: isize) {
         let Some(st) = slot.as_mut() else { return };
         // 탐색기가 다시 시작되면 알림 영역이 새로 만들어지면서 아이콘이 사라진다. Slint 트레이는 그때 오는 알림(TaskbarCreated)을
         // 받지 못하는 메시지 전용 창을 쓰므로, 작업 표시줄 창이 바뀐 것을 보고 아이콘을 새로 만든다(로그인 직후 작업 표시줄이 늦게 뜬 경우도).
+        // 새 작업 표시줄이 아직 아이콘을 받을 준비가 안 돼 실패했으면 다음 확인 때 다시 만든다.
         if taskbar != 0 && taskbar != st.taskbar {
             if let Ok(ui) = new_status_tray(&view) {
                 st.ui = ui; // 새 아이콘을 띄운 뒤 이전 것을 버린다(이벤트 루프가 끝나지 않도록)
                 st.tone = view.tone;
+                st.taskbar = taskbar;
             }
-            st.taskbar = taskbar;
             return;
         }
         if st.tone != view.tone {
@@ -1931,13 +1988,14 @@ fn run_tray() -> Result<(), slint::PlatformError> {
                 });
                 return;
             }
-            let snap = collect_snapshot();
+            let snap = collect_snapshot_for(false);
             // 감시 작업이 파일을 쓰는 순간이라 읽지 못했으면 지난 값을 쓴다.
             if snap.watch_at.is_some() {
                 last_at = snap.watch_at;
             }
+            // 깨어난 시각은 Windows에서 읽지만(watch_settling), 읽지 못하는 경우(모던 대기 등)에 대비해 이 스레드가 직접 본 것도 쓴다.
             let settle = snap.watch_interval.map(|i| Duration::from_secs(watch_stale_after(i)));
-            let settling = just_started(snap.watch_interval) || woke.zip(settle).is_some_and(|(w, s)| w.elapsed() < s);
+            let settling = snap.watch_settling || woke.zip(settle).is_some_and(|(w, s)| w.elapsed() < s);
             let view = tray_view(&snap, &watch_health(snap.watch_interval, last_at, unix_now(), settling));
             let taskbar = taskbar_window();
             if slint::invoke_from_event_loop(move || apply_tray_view(view, taskbar)).is_err() {
@@ -2107,14 +2165,16 @@ mod tests {
         assert_eq!(watch_interval_minutes(5, 0), Some(1));
         assert_eq!(watch_interval_minutes(0, 3), Some(1));
         assert_eq!(watch_interval_minutes(0, 0), None);
-        assert_eq!(watch_stale_after(1), 300);
+        // 1분 주기: 실행 제한(4분)까지 걸린 한 번 뒤 다음 실행까지 기다린다
+        assert_eq!(watch_stale_after(1), 420);
         assert_eq!(watch_stale_after(5), 1020);
 
         let now = 1_000_000;
         assert_eq!(watch_health(None, Some(now), now, false), WatchHealth::Off);
         assert_eq!(watch_health(Some(1), Some(now - 20), now, false), WatchHealth::Alive(20));
-        assert_eq!(watch_health(Some(1), Some(now - 300), now, false), WatchHealth::Alive(300));
-        assert_eq!(watch_health(Some(1), Some(now - 301), now, false), WatchHealth::Stale(Some(5)));
+        assert_eq!(watch_health(Some(1), Some(now - 330), now, false), WatchHealth::Alive(330), "서비스 재시작이 길어진 실행 뒤");
+        assert_eq!(watch_health(Some(1), Some(now - 420), now, false), WatchHealth::Alive(420));
+        assert_eq!(watch_health(Some(1), Some(now - 421), now, false), WatchHealth::Stale(Some(7)));
         assert_eq!(watch_health(Some(5), Some(now - 900), now, false), WatchHealth::Alive(900), "5분 주기는 17분까지 정상");
         assert_eq!(watch_health(Some(1), None, now, false), WatchHealth::Stale(None));
         // 켜진 직후·깨어난 직후에는 낡은 기록이어도 기다린다
@@ -2157,6 +2217,8 @@ mod tests {
             watch_interval: Some(1),
             watch_at: None,
             stopped_for: None,
+            watch_settling: false,
+            tray_on: true,
         }
     }
 

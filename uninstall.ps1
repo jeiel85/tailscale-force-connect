@@ -67,7 +67,7 @@ try {
     }
     # 상태 아이콘(트레이)은 스스로 닫히지 않으므로 알림 작업(트레이를 다시 띄움)을 지운 뒤 바로 닫는다. 모든 로그인 세션의 것을 닫는다.
     $trays = Get-CimInstance Win32_Process -Filter "Name='$appName.exe'" -ErrorAction SilentlyContinue |
-        Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith($appDir, [StringComparison]::OrdinalIgnoreCase) -and "$($_.CommandLine)" -match '\s--tray(\s|$)' }
+        Where-Object { $_.ExecutablePath -ieq (Join-Path $appDir "$appName.exe") -and "$($_.CommandLine)" -match '\s--tray(\s|$)' }
     if ($trays) {
         $trays | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
         Write-Report "트레이 아이콘 닫음: $(@($trays).Count)개"
