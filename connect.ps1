@@ -24,6 +24,7 @@ $upWait      = 30000                       # tailscale up 한 번에 기다리�
 $statusWait  = 20000                       # tailscale status 한 번에 기다리는 최대 시간(ms). 서비스가 멈추면 응답하지 않을 수 있다
 $stuckFile   = Join-Path $PSScriptRoot 'stuck-since.json'   # 멈춘 상태를 처음 본 시각(since)과 마지막으로 본 시각(last)
 $healFile    = Join-Path $PSScriptRoot 'heal-last.json'     # 마지막 서비스 재시작 결과. 관리 창과 알림이 읽는다
+$watchFile   = Join-Path $PSScriptRoot 'watch-last.json'    # 감시 작업이 마지막으로 확인한 시각과 판정. 트레이·관리 창이 '감시가 살아 있는지' 보는 데 쓴다
 $healCooldownMinutes = 30    # 재시작해도 풀리지 않는 경우(방화벽 등) 계속 재시작하지 않도록 쉬는 시간
 $healOkCooldownMinutes = 10  # 재시작으로 풀린 뒤 다시 멈췄을 때 쉬는 시간
 $maxGapSeconds = 420         # 마지막 확인 뒤 이만큼 비었으면(절전·꺼짐) 멈춘 시간을 새로 센다. 감시 주기(1~5분)보다 길어야 한다
@@ -313,14 +314,20 @@ if ($Heal) {
 }
 
 if ($Watch) {
-    # 주기 감시: 정상이면 아무것도 남기지 않고 끝낸다(로그가 불어나지 않도록).
+    # 주기 감시: 정상이면 로그는 남기지 않고 끝낸다(로그가 불어나지 않도록).
+    # 대신 확인한 시각을 watch-last.json 한 파일에 덮어써서, 일반 권한의 트레이·관리 창이 감시 작업이 도는지 볼 수 있게 한다
+    # (SYSTEM 예약 작업의 실행 기록은 일반 권한으로 조회할 수 없다).
     $sinceFile = Join-Path $PSScriptRoot 'stopped-since.txt'
-    if (-not $ts) { exit 3 }
+    if (-not $ts) {
+        Write-JsonFile $watchFile ([ordered]@{ at = Get-Epoch; kind = 'missing' })
+        exit 3
+    }
     $svc = Get-Service -Name Tailscale -ErrorAction SilentlyContinue
     $svcStatus = if ($svc) { "$($svc.Status)" } else { $null }
     $startType = if ($svc) { "$($svc.StartType)" } else { $null }
     $statusResult = if ($svcStatus -eq 'Running') { Get-TsStatus } else { $null }
     $verdict = Get-WatchVerdict -ServiceStatus $svcStatus -StartType $startType -StatusResult $statusResult -Reachable { Test-ControlReachable }
+    Write-JsonFile $watchFile ([ordered]@{ at = Get-Epoch; kind = $verdict.Kind })
 
     # 'stopped'가 아니면 끊김 기록을, 'stuck'이 아니면 멈춤 기록을 지운다.
     # 로그인 필요 등 다른 상태는 'tailscale up'이나 재시작으로 풀 수 없으므로 건드리지 않는다.

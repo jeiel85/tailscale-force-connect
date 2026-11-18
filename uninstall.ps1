@@ -65,6 +65,13 @@ try {
         Unregister-ScheduledTask -TaskName $alertTask -Confirm:$false
         Write-Report "예약 작업 삭제: $alertTask"
     }
+    # 상태 아이콘(트레이)은 스스로 닫히지 않으므로 알림 작업(트레이를 다시 띄움)을 지운 뒤 바로 닫는다. 모든 로그인 세션의 것을 닫는다.
+    $trays = Get-CimInstance Win32_Process -Filter "Name='$appName.exe'" -ErrorAction SilentlyContinue |
+        Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith($appDir, [StringComparison]::OrdinalIgnoreCase) -and "$($_.CommandLine)" -match '\s--tray(\s|$)' }
+    if ($trays) {
+        $trays | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+        Write-Report "트레이 아이콘 닫음: $(@($trays).Count)개"
+    }
     if (Get-ScheduledTask -TaskName $notifyTask -ErrorAction SilentlyContinue) {
         Unregister-ScheduledTask -TaskName $notifyTask -Confirm:$false
         Write-Report "예약 작업 삭제: $notifyTask"
@@ -119,7 +126,7 @@ try {
 
     # 사용자별 알림 기록(%LOCALAPPDATA%\Tailscale Force Connect). 관리 창과 알림 작업이 사용자 권한으로 만든 것이다.
     # 사용자가 바꿀 수 있는 위치라, 관리자 권한으로 엉뚱한 곳을 지우지 않도록 링크는 따라가지 않고 이 도구가 만드는 파일 이름만 지운다.
-    $userFiles = @('notified-version.txt', 'disconnect-notified.txt', 'heal-notified.txt', 'notify-off.txt', 'auto-update-attempted.txt', 'logon-offered.txt')
+    $userFiles = @('notified-version.txt', 'disconnect-notified.txt', 'heal-notified.txt', 'notify-off.txt', 'auto-update-attempted.txt', 'logon-offered.txt', 'tray-off.txt')
     $cleaned = 0
     # 주의: $home·$profile은 PowerShell 자동 변수라 다른 이름을 쓴다.
     foreach ($entry in Get-ChildItem 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList' -ErrorAction SilentlyContinue) {

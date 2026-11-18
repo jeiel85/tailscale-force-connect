@@ -10,7 +10,7 @@ use std::{
     process::{Command, ExitStatus, Stdio},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, AtomicI64, Ordering},
+        atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering},
     },
     time::{Duration, Instant, SystemTime},
 };
@@ -55,6 +55,8 @@ struct UiState {
     active_peers: Mutex<Vec<String>>,
     /// 원격 접속 경고에서 [계속]을 누르면 실행할 일
     pending_test: Mutex<Option<PendingTest>>,
+    /// 마지막으로 읽은 감시 작업 확인 시각(유닉스 초, 0이면 모름). 감시 작업이 파일을 쓰는 순간 읽지 못해도 이 값을 쓴다.
+    watch_at: AtomicU64,
 }
 
 /// 연결을 몇 초 끊는 작업. 원격 접속 중이면 한 번 더 확인받고 실행한다.
@@ -73,6 +75,8 @@ enum LaunchMode {
     NotifyUpdate,
     WatchNotify,
     NotifyTest,
+    /// 작업 표시줄 알림 영역의 상태 아이콘(창 없이 상주)
+    Tray,
 }
 
 /// tailscale-force-connect: 링크(알림, 웹 페이지)로 열리면 다른 인자는 보지 않고 창만 연다.
@@ -89,6 +93,8 @@ fn launch_mode(args: &[String]) -> LaunchMode {
         LaunchMode::WatchNotify
     } else if has("--notify-test") {
         LaunchMode::NotifyTest
+    } else if has("--tray") {
+        LaunchMode::Tray
     } else {
         LaunchMode::Window
     }
@@ -113,6 +119,12 @@ struct Snapshot {
     log: Option<Vec<(String, String)>>,
     fast_startup: bool,
     active_peers: Vec<String>,
+    /// 감시 작업의 확인 주기(분). 감시 작업을 쓰지 않으면(설치 안 됨, 자동 재연결·멈춤 감시 둘 다 끔) None
+    watch_interval: Option<i64>,
+    /// 감시 작업이 마지막으로 확인한 시각(유닉스 초, watch-last.json). 기록이 없으면 None
+    watch_at: Option<u64>,
+    /// 직접 끊은 상태를 감시 작업이 처음 본 뒤 지난 분
+    stopped_for: Option<i64>,
 }
 
 /// Windows 알림의 앱 ID. install.ps1이 시작 메뉴 바로가기에 같은 값을 기록한다.
@@ -138,12 +150,18 @@ fn main() -> Result<(), slint::PlatformError> {
             );
             return Ok(());
         }
+        LaunchMode::Tray => return run_tray(),
         LaunchMode::Window => {}
     }
 
     let ui = AppWindow::new()?;
     ui.set_version(env!("CARGO_PKG_VERSION").into());
     ui.set_notify_on(notifications_enabled());
+    ui.set_tray_on(tray_enabled());
+    // 업데이트·설치 직후 다시 열린 관리 창이면 트레이도 바로 띄운다(그 밖에는 1분 알림 작업이 띄운다).
+    if tray_should_run() {
+        ensure_tray_running();
+    }
     #[cfg(debug_assertions)]
     if std::env::var_os("TFC_FORCE_LIGHT").is_some() {
         ui.set_force_light(true); // 개발용: 어두운 테마 PC에서 밝은 테마 화면 확인
@@ -157,6 +175,7 @@ fn main() -> Result<(), slint::PlatformError> {
         installed_heal: AtomicI64::new(-1),
         active_peers: Mutex::new(Vec::new()),
         pending_test: Mutex::new(None),
+        watch_at: AtomicU64::new(0),
     });
 
     let refresh = {
@@ -326,6 +345,26 @@ fn main() -> Result<(), slint::PlatformError> {
                     ui.set_notify_on(!on);
                     show_result(&ui, false, "알림 설정을 바꾸지 못했습니다", &e.to_string());
                 }
+            }
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        ui.on_tray_toggled(move |on| {
+            if let Err(e) = set_tray_enabled(on) {
+                if let Some(ui) = weak.upgrade() {
+                    ui.set_tray_on(!on);
+                    show_result(&ui, false, "트레이 아이콘 설정을 바꾸지 못했습니다", &e.to_string());
+                }
+                return;
+            }
+            if on {
+                // 받은 zip에서 연 창이면 설치된 알림 작업이 1분 안에 띄운다(설치되지 않은 실행 파일로 띄우지 않는다).
+                if tray_should_run() {
+                    ensure_tray_running();
+                }
+            } else {
+                wake_tray(); // 떠 있는 트레이가 바로 꺼진 것을 알아채고 끝나게 한다
             }
         });
     }
@@ -592,6 +631,14 @@ fn apply_snapshot(ui: &AppWindow, s: &Snapshot, state: &UiState) {
     };
     ui.set_heal_text(heal_text.into());
     ui.set_heal_on(heal_on);
+    if let Some(at) = s.watch_at {
+        state.watch_at.store(at, Ordering::SeqCst);
+    }
+    let watch_at = Some(state.watch_at.load(Ordering::SeqCst)).filter(|at| *at > 0);
+    let health = watch_health(s.watch_interval, watch_at, unix_now(), just_started(s.watch_interval));
+    let (watch_text, watch_tone) = watch_window_text(&health, s.watch_interval);
+    ui.set_watch_text(watch_text.into());
+    ui.set_watch_tone(watch_tone);
     if let Ok(mut peers) = state.active_peers.lock() {
         peers.clone_from(&s.active_peers);
     }
@@ -679,6 +726,9 @@ fn collect_snapshot() -> Snapshot {
         log: read_log_tail(&data.join("connect.log")),
         fast_startup: fast_startup_enabled(),
         active_peers,
+        watch_interval: if installed && settings_found { watch_interval_minutes(reconnect_minutes, heal_active) } else { None },
+        watch_at: read_data_json("watch-last.json").and_then(|v| v.get("at")?.as_u64()),
+        stopped_for: stopped_for_minutes(),
     }
 }
 
@@ -1129,12 +1179,17 @@ fn seconds_label(secs: i32) -> String {
     if secs > 0 && secs % 60 == 0 { format!("{}분", secs / 60) } else { format!("{secs}초") }
 }
 
-/// 관리 창이 이미 열려 있는지(창 제목과 winit 창 클래스로 찾는다).
-fn manager_window_open() -> bool {
+/// 열려 있는 관리 창(창 제목과 winit 창 클래스로 찾는다). 없으면 null.
+fn manager_window() -> windows_sys::Win32::Foundation::HWND {
     use windows_sys::Win32::UI::WindowsAndMessaging::FindWindowW;
     let class = wide("Window Class");
     let title = wide("Tailscale Force Connect");
-    !unsafe { FindWindowW(class.as_ptr(), title.as_ptr()) }.is_null()
+    unsafe { FindWindowW(class.as_ptr(), title.as_ptr()) }
+}
+
+/// 관리 창이 이미 열려 있는지
+fn manager_window_open() -> bool {
+    !manager_window().is_null()
 }
 
 /// 로그인 직후 새 버전을 찾았으면 관리 창을 연다. 창은 열면서 새 버전을 다시 확인하고, AUTO_UPDATE_SECONDS 뒤 자동으로 업데이트한다.
@@ -1196,6 +1251,11 @@ fn current_backend_state() -> Option<String> {
 /// 끊긴 것을 처음 보면 "끊겼습니다, 약 N분 뒤 다시 연결" 알림을 한 번 띄우고,
 /// 그 뒤 다시 연결되면 "다시 연결됐습니다" 알림으로 마무리한다. 연결돼 있는 동안은 아무것도 하지 않는다.
 fn watch_and_notify() {
+    // 트레이 아이콘이 떠 있지 않으면(로그인 직후, 업데이트로 닫힘, 오류로 끝남) 다시 띄운다. 알림을 꺼도 트레이는 따로 정한다.
+    // 이 작업이 끝나거나 1분 제한으로 끝나도 여기서 띄운 프로세스는 남는다(2026-11-18 이 PC에서 확인).
+    if tray_should_run() {
+        ensure_tray_running();
+    }
     if !notifications_enabled() {
         return; // 관리 창에서 알림을 껐다
     }
@@ -1391,6 +1451,516 @@ fn is_newer(latest: &str, current: &str) -> bool {
     }
 }
 
+// ---------------------------------------------------------------------------
+// 감시 작업이 살아 있는지
+// 감시 작업(SYSTEM)은 정상일 때 로그를 남기지 않고, 그 실행 기록은 일반 권한으로 조회할 수 없다.
+// 그래서 connect.ps1 -Watch가 실행할 때마다 덮어쓰는 watch-last.json의 시각으로 판단한다.
+// ---------------------------------------------------------------------------
+
+/// install.ps1과 같은 규칙의 감시 작업 확인 주기(분): 멈춤 감시가 켜져 있거나 자동 재연결이 10분 미만이면 1분, 그 밖에는 5분.
+/// 둘 다 꺼져 있으면 감시 작업을 등록하지 않으므로 None.
+fn watch_interval_minutes(reconnect: i64, heal: i64) -> Option<i64> {
+    if reconnect <= 0 && heal <= 0 {
+        return None;
+    }
+    Some(if heal > 0 || reconnect < 10 { 1 } else { 5 })
+}
+
+/// 마지막 확인 뒤 이만큼(초) 지나면 감시 작업이 멈춘 것으로 본다. 확인 주기의 세 배에 2분을 더한다.
+/// 서비스 재시작(최대 2분)이 든 실행 중에는 다음 실행을 건너뛰므로 한두 번은 빠질 수 있다.
+fn watch_stale_after(interval: i64) -> u64 {
+    (interval.max(1) * 3 + 2) as u64 * 60
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum WatchHealth {
+    /// 감시 작업을 쓰지 않음(설치 안 됨, 자동 재연결·멈춤 감시 둘 다 끔)
+    Off,
+    /// 정상: 마지막 확인이 이 초 전
+    Alive(u64),
+    /// 켜진 직후·설치 직후·깨어난 직후라 아직 판단하지 않음
+    Pending,
+    /// 마지막 확인 뒤 이 분이 지나도록 돌지 않음. 기록이 아예 없으면 None
+    Stale(Option<u64>),
+}
+
+/// settling: 켜진 직후·설치 직후·절전에서 깨어난 직후라 감시 작업이 아직 돌 기회가 없었을 수 있는 동안
+fn watch_health(interval: Option<i64>, last_at: Option<u64>, now: u64, settling: bool) -> WatchHealth {
+    let Some(interval) = interval else { return WatchHealth::Off };
+    if let Some(at) = last_at {
+        let age = now.saturating_sub(at); // 시계가 뒤로 가 미래 시각이면 방금 확인한 것으로 본다
+        if age <= watch_stale_after(interval) {
+            return WatchHealth::Alive(age);
+        }
+    }
+    if settling {
+        return WatchHealth::Pending;
+    }
+    WatchHealth::Stale(last_at.map(|at| now.saturating_sub(at) / 60))
+}
+
+fn unix_now() -> u64 {
+    SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+}
+
+/// 켜진 직후나 설치·업데이트 직후에는 감시 작업이 아직 한 번도 돌지 않았을 수 있다
+/// (작업은 부팅 뒤, 설치하고 1분 뒤부터 돈다). 설치 시각은 install.ps1이 매번 새로 쓰는 settings.json의 수정 시각으로 본다.
+fn just_started(interval: Option<i64>) -> bool {
+    use windows_sys::Win32::System::SystemInformation::GetTickCount64;
+    let Some(interval) = interval else { return false };
+    let wait = Duration::from_secs(watch_stale_after(interval));
+    let uptime = Duration::from_millis(unsafe { GetTickCount64() });
+    let since_install = std::fs::metadata(data_dir().join("settings.json"))
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| SystemTime::now().duration_since(t).ok());
+    uptime < wait || since_install.is_some_and(|d| d < wait)
+}
+
+/// "45초", "12분", "3시간", "2일"
+fn ago_label(secs: u64) -> String {
+    match secs {
+        s if s < 60 => format!("{s}초"),
+        s if s < 3600 => format!("{}분", s / 60),
+        s if s < 48 * 3600 => format!("{}시간", s / 3600),
+        s => format!("{}일", s / 86400),
+    }
+}
+
+/// 관리 창의 감시 작업 줄: (문구, 0 정상 / 1 확인 전 / 2 멈춘 것 같음). 문구가 비면 숨긴다.
+fn watch_window_text(h: &WatchHealth, interval: Option<i64>) -> (String, i32) {
+    match h {
+        WatchHealth::Off => (String::new(), 1),
+        WatchHealth::Alive(age) => (
+            format!("감시 작업 정상: {} 전에 확인했습니다({}분마다 확인).", ago_label(*age), interval.unwrap_or(1)),
+            0,
+        ),
+        WatchHealth::Pending => ("감시 작업이 곧 첫 확인을 합니다(켜지거나 설치된 직후).".into(), 1),
+        WatchHealth::Stale(Some(m)) => (
+            format!("감시 작업이 {} 동안 돌지 않았습니다. [적용]을 누르면 다시 등록합니다.", ago_label(m * 60)),
+            2,
+        ),
+        WatchHealth::Stale(None) => ("감시 작업의 확인 기록이 없습니다. [적용]을 누르면 다시 등록합니다.".into(), 2),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 작업 표시줄 상태 아이콘 (--tray)
+// 트레이가 떠 있지 않으면 1분마다 도는 알림 작업(--watch-notify)과 관리 창이 띄운다. 트레이는 알림을 띄우지 않고 상태만 보여 준다
+// (알림은 지금처럼 알림 작업이 맡는다. 두 곳에서 띄우면 겹친다).
+// ---------------------------------------------------------------------------
+
+/// 트레이가 상태를 다시 읽는 간격. 관리 창이 깨우면(트레이 끄기) 바로 다시 본다.
+const TRAY_POLL: Duration = Duration::from_secs(15);
+/// 같은 로그인 세션에 트레이가 하나만 뜨게 하는 이름(Local\은 세션마다 따로). 개발 빌드는 설치된 트레이와 겹치지 않게 따로 둔다.
+const TRAY_MUTEX: &str = if cfg!(debug_assertions) { r"Local\TailscaleForceConnect.Tray.Dev" } else { r"Local\TailscaleForceConnect.Tray" };
+/// 관리 창이 떠 있는 트레이를 바로 깨우는 이벤트
+const TRAY_WAKE: &str = if cfg!(debug_assertions) { r"Local\TailscaleForceConnect.TrayWake.Dev" } else { r"Local\TailscaleForceConnect.TrayWake" };
+
+/// 트레이 아이콘을 끈 사용자의 표시 파일. 관리 창의 '트레이 아이콘' 선택이나 트레이 메뉴로 만들고 지운다.
+fn tray_off_marker() -> PathBuf {
+    user_state_dir().join("tray-off.txt")
+}
+
+fn tray_enabled() -> bool {
+    !tray_off_marker().exists()
+}
+
+fn set_tray_enabled(on: bool) -> std::io::Result<()> {
+    let marker = tray_off_marker();
+    if on {
+        match std::fs::remove_file(&marker) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+            _ => Ok(()),
+        }
+    } else {
+        std::fs::create_dir_all(user_state_dir())?;
+        std::fs::write(&marker, "트레이 아이콘을 끈 표시입니다. 관리 창에서 다시 켜면 지워집니다.")
+    }
+}
+
+/// 설치된 관리 앱(Program Files)이고 이 PC에 설치돼 있을 때만 트레이를 띄운다(받은 zip에서 연 창은 띄우지 않음).
+fn tray_should_run() -> bool {
+    running_from_program_files() && data_dir().join("connect.ps1").exists()
+}
+
+/// 이 프로세스가 끝나면 닫히는 핸들
+struct OwnedHandle(windows_sys::Win32::Foundation::HANDLE);
+// 커널 개체 핸들은 어느 스레드에서 써도 된다.
+unsafe impl Send for OwnedHandle {}
+impl Drop for OwnedHandle {
+    fn drop(&mut self) {
+        unsafe { windows_sys::Win32::Foundation::CloseHandle(self.0) };
+    }
+}
+
+/// 이 세션에 트레이가 이미 떠 있으면 None. 돌려받은 핸들을 쥐고 있는 동안 다른 트레이는 뜨지 않는다.
+fn acquire_tray_instance() -> Option<Option<OwnedHandle>> {
+    use windows_sys::Win32::{
+        Foundation::{ERROR_ALREADY_EXISTS, GetLastError},
+        System::Threading::CreateMutexW,
+    };
+    let name = wide(TRAY_MUTEX);
+    let h = unsafe { CreateMutexW(std::ptr::null(), 0, name.as_ptr()) };
+    if h.is_null() {
+        return Some(None); // 만들지 못했으면 겹칠 수 있더라도 띄운다(아이콘이 없는 것보다 낫다)
+    }
+    let handle = OwnedHandle(h);
+    if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
+        return None;
+    }
+    Some(Some(handle))
+}
+
+fn tray_running() -> bool {
+    use windows_sys::Win32::System::Threading::{OpenMutexW, SYNCHRONIZATION_SYNCHRONIZE};
+    let name = wide(TRAY_MUTEX);
+    let h = unsafe { OpenMutexW(SYNCHRONIZATION_SYNCHRONIZE, 0, name.as_ptr()) };
+    if h.is_null() {
+        return false;
+    }
+    drop(OwnedHandle(h));
+    true
+}
+
+/// 트레이를 켜 두었는데 떠 있지 않으면 띄운다. 겹쳐 띄워도 나중 것은 바로 끝난다.
+/// 관리자 권한으로 연 관리 창에서는 띄우지 않는다(트레이가 관리자 권한으로 상주하고, 일반 트레이도 막는다).
+fn ensure_tray_running() {
+    use windows_sys::Win32::UI::Shell::IsUserAnAdmin;
+    if !tray_enabled() || tray_running() || unsafe { IsUserAnAdmin() } != 0 {
+        return;
+    }
+    let Ok(exe) = std::env::current_exe() else { return };
+    let _ = Command::new(exe).arg("--tray").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn();
+}
+
+/// 떠 있는 트레이가 바로 상태를 다시 읽게 한다(트레이를 끄면 바로 사라진다).
+fn wake_tray() {
+    use windows_sys::Win32::System::Threading::{EVENT_MODIFY_STATE, OpenEventW, SetEvent};
+    let name = wide(TRAY_WAKE);
+    let h = unsafe { OpenEventW(EVENT_MODIFY_STATE, 0, name.as_ptr()) };
+    if !h.is_null() {
+        let h = OwnedHandle(h);
+        unsafe { SetEvent(h.0) };
+    }
+}
+
+/// 작업 표시줄 창. 탐색기가 다시 시작되면 바뀐다(없으면 0).
+fn taskbar_window() -> isize {
+    use windows_sys::Win32::UI::WindowsAndMessaging::FindWindowW;
+    let class = wide("Shell_TrayWnd");
+    unsafe { FindWindowW(class.as_ptr(), std::ptr::null()) as isize }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Tone {
+    /// 연결됨, 감시 정상
+    Ok,
+    /// 직접 끊음, 서버와 연결 안 됨, 응답 없음
+    Warn,
+    /// 감시 작업 멈춤, 로그인 필요, Tailscale 없음, 설치 안 됨
+    Bad,
+    /// 확인하는 중, 알 수 없음
+    Idle,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct TrayView {
+    tone: Tone,
+    state_line: String,
+    watch_line: String,
+    tooltip: String,
+}
+
+/// 알림 영역 툴팁은 끝의 null을 포함해 128자(UTF-16)까지다.
+const TOOLTIP_MAX: usize = 127;
+
+fn truncate_utf16(s: &str, max: usize) -> String {
+    if s.encode_utf16().count() <= max {
+        return s.to_string();
+    }
+    let mut out = String::new();
+    let mut used = 0;
+    for c in s.chars() {
+        if used + c.len_utf16() > max - 1 {
+            break;
+        }
+        used += c.len_utf16();
+        out.push(c);
+    }
+    out.push('…');
+    out
+}
+
+fn tray_view(s: &Snapshot, watch: &WatchHealth) -> TrayView {
+    let tone = if !s.installed || matches!(watch, WatchHealth::Stale(_)) {
+        Tone::Bad
+    } else {
+        match s.state {
+            "running" => Tone::Ok,
+            "stopped" | "stuck" => Tone::Warn,
+            "login" | "missing" => Tone::Bad,
+            _ => Tone::Idle,
+        }
+    };
+    let state_line = match s.state {
+        "running" if !s.detail.is_empty() => format!("{} · {}", s.title, s.detail),
+        "stopped" => {
+            let next = if !s.installed {
+                None
+            } else if s.reconnect_minutes > 0 {
+                Some(match s.stopped_for {
+                    Some(m) if m < s.reconnect_minutes => format!("약 {} 뒤 다시 연결", minutes_label(s.reconnect_minutes - m)),
+                    Some(_) => "곧 다시 연결".to_string(),
+                    None => format!("{} 뒤 다시 연결", minutes_label(s.reconnect_minutes)),
+                })
+            } else {
+                Some("다음 부팅 때 연결".to_string())
+            };
+            match next {
+                Some(n) => format!("{} · {n}", s.title),
+                None => s.title.clone(),
+            }
+        }
+        "stuck" if s.title == "응답 없음" => "응답 없음 · Tailscale이 답하지 않음".to_string(),
+        "stuck" => format!("{} · 다른 기기에서는 offline", s.title),
+        _ => s.title.clone(),
+    };
+    let watch_line = if !s.installed {
+        "설치되지 않음 · 관리 창에서 설치".to_string()
+    } else {
+        match watch {
+            WatchHealth::Off => "자동 재연결·멈춤 감시 꺼짐".to_string(),
+            WatchHealth::Alive(age) => format!("감시 정상 · {} 전 확인", ago_label(*age)),
+            WatchHealth::Pending => "감시 작업 첫 확인 대기".to_string(),
+            WatchHealth::Stale(Some(m)) => format!("감시 작업이 {} 동안 돌지 않음", ago_label(m * 60)),
+            WatchHealth::Stale(None) => "감시 작업 확인 기록 없음".to_string(),
+        }
+    };
+    let tooltip = truncate_utf16(&format!("Tailscale Force Connect\n{state_line}\n{watch_line}"), TOOLTIP_MAX);
+    TrayView { tone, state_line, watch_line, tooltip }
+}
+
+/// 관리 창의 어두운 테마 색과 같다. 빨강만 16px에서도 주황과 구별되도록 더 진하게 했다.
+fn tone_rgb(t: Tone) -> [u8; 3] {
+    match t {
+        Tone::Ok => [0x3C, 0xC2, 0x93],
+        Tone::Warn => [0xF0, 0xA6, 0x3A],
+        Tone::Bad => [0xEB, 0x4B, 0x3F],
+        Tone::Idle => [0x8A, 0x98, 0xA3],
+    }
+}
+
+fn in_rounded_square(x: f32, y: f32, size: f32, radius: f32) -> bool {
+    let cx = x.clamp(radius, size - radius);
+    let cy = y.clamp(radius, size - radius);
+    (x - cx).powi(2) + (y - cy).powi(2) <= radius * radius
+}
+
+/// 앱 아이콘과 같은 모양(어두운 둥근 사각형, 밝은 고리, 가운데 원)을 상태 색으로 그린다.
+/// 알림 영역 아이콘은 16~32px이라 앱 아이콘보다 고리와 가운데 원을 조금 키웠다. 가장자리는 한 픽셀을 4x4로 나눠 부드럽게 칠한다.
+fn render_status_icon(size: u32, tone: Tone) -> slint::SharedPixelBuffer<slint::Rgba8Pixel> {
+    const SS: u32 = 4;
+    let s = size as f32;
+    let c = s / 2.0;
+    let bg = [0x14u8, 0x20, 0x2A];
+    let ring = [0xCFu8, 0xE3, 0xD8];
+    let dot = tone_rgb(tone);
+    let glow: [u8; 3] = std::array::from_fn(|i| (bg[i] as f32 * 0.7 + dot[i] as f32 * 0.3) as u8);
+    let (corner, r_dot, r_in, r_out) = (s * 0.22, s * 0.27, s * 0.345, s * 0.43);
+    let mut buf = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::new(size, size);
+    let pixels = buf.make_mut_slice();
+    for y in 0..size {
+        for x in 0..size {
+            let mut sum = [0u32; 3];
+            let mut covered = 0u32;
+            for sy in 0..SS {
+                for sx in 0..SS {
+                    let fx = x as f32 + (sx as f32 + 0.5) / SS as f32;
+                    let fy = y as f32 + (sy as f32 + 0.5) / SS as f32;
+                    if !in_rounded_square(fx, fy, s, corner) {
+                        continue;
+                    }
+                    let d = ((fx - c).powi(2) + (fy - c).powi(2)).sqrt();
+                    let col = if d <= r_dot {
+                        dot
+                    } else if d < r_in {
+                        glow
+                    } else if d <= r_out {
+                        ring
+                    } else {
+                        bg
+                    };
+                    for i in 0..3 {
+                        sum[i] += col[i] as u32;
+                    }
+                    covered += 1;
+                }
+            }
+            pixels[(y * size + x) as usize] = if covered == 0 {
+                slint::Rgba8Pixel { r: 0, g: 0, b: 0, a: 0 }
+            } else {
+                slint::Rgba8Pixel {
+                    r: (sum[0] / covered) as u8,
+                    g: (sum[1] / covered) as u8,
+                    b: (sum[2] / covered) as u8,
+                    a: (covered * 255 / (SS * SS)) as u8,
+                }
+            };
+        }
+    }
+    buf
+}
+
+/// 알림 영역 아이콘 크기(100%에서 16px). 이 크기로 그려야 흐리지 않다.
+fn tray_icon_size() -> u32 {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_CXSMICON};
+    (unsafe { GetSystemMetrics(SM_CXSMICON) }).clamp(16, 64) as u32
+}
+
+fn status_icon(tone: Tone) -> slint::Image {
+    slint::Image::from_rgba8(render_status_icon(tray_icon_size(), tone))
+}
+
+/// 트레이를 띄운 스레드(이벤트 루프)에서만 쓴다.
+struct TrayState {
+    ui: StatusTray,
+    tone: Tone,
+    /// 아이콘을 만들 때의 작업 표시줄 창
+    taskbar: isize,
+}
+
+thread_local! {
+    static TRAY: std::cell::RefCell<Option<TrayState>> = const { std::cell::RefCell::new(None) };
+    /// 관리 창을 띄운 시각. 빠르게 두 번 눌러 창이 두 개 뜨지 않게 한다.
+    static WINDOW_SPAWNED: std::cell::Cell<Option<Instant>> = const { std::cell::Cell::new(None) };
+}
+
+/// 관리 창이 열려 있으면 앞으로 가져오고, 없으면 연다.
+fn open_manager_window() {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{IsIconic, SW_RESTORE, SetForegroundWindow, ShowWindow};
+    let hwnd = manager_window();
+    if !hwnd.is_null() {
+        unsafe {
+            if IsIconic(hwnd) != 0 {
+                ShowWindow(hwnd, SW_RESTORE);
+            }
+            SetForegroundWindow(hwnd);
+        }
+        return;
+    }
+    if WINDOW_SPAWNED.get().is_some_and(|t| t.elapsed() < Duration::from_secs(5)) {
+        return; // 방금 띄운 창이 아직 뜨는 중
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if Command::new(exe).spawn().is_ok() {
+            WINDOW_SPAWNED.set(Some(Instant::now()));
+        }
+    }
+}
+
+fn new_status_tray(view: &TrayView) -> Result<StatusTray, slint::PlatformError> {
+    let tray = StatusTray::new()?;
+    tray.set_status_icon(status_icon(view.tone));
+    tray.set_tip(view.tooltip.clone().into());
+    tray.set_state_line(view.state_line.clone().into());
+    tray.set_watch_line(view.watch_line.clone().into());
+    tray.on_open_window(open_manager_window);
+    tray.on_turn_off(|| {
+        let _ = set_tray_enabled(false);
+        let _ = slint::quit_event_loop();
+    });
+    tray.show()?;
+    Ok(tray)
+}
+
+fn apply_tray_view(view: TrayView, taskbar: isize) {
+    TRAY.with(|cell| {
+        let mut slot = cell.borrow_mut();
+        let Some(st) = slot.as_mut() else { return };
+        // 탐색기가 다시 시작되면 알림 영역이 새로 만들어지면서 아이콘이 사라진다. Slint 트레이는 그때 오는 알림(TaskbarCreated)을
+        // 받지 못하는 메시지 전용 창을 쓰므로, 작업 표시줄 창이 바뀐 것을 보고 아이콘을 새로 만든다(로그인 직후 작업 표시줄이 늦게 뜬 경우도).
+        if taskbar != 0 && taskbar != st.taskbar {
+            if let Ok(ui) = new_status_tray(&view) {
+                st.ui = ui; // 새 아이콘을 띄운 뒤 이전 것을 버린다(이벤트 루프가 끝나지 않도록)
+                st.tone = view.tone;
+            }
+            st.taskbar = taskbar;
+            return;
+        }
+        if st.tone != view.tone {
+            st.ui.set_status_icon(status_icon(view.tone));
+            st.tone = view.tone;
+        }
+        st.ui.set_tip(view.tooltip.into());
+        st.ui.set_state_line(view.state_line.into());
+        st.ui.set_watch_line(view.watch_line.into());
+    });
+}
+
+/// --tray: 알림 영역에 상태 아이콘을 띄우고 15초마다 갱신한다. 트레이를 끄면(관리 창, 트레이 메뉴) 끝난다.
+fn run_tray() -> Result<(), slint::PlatformError> {
+    use windows_sys::Win32::System::Threading::{CreateEventW, WaitForSingleObject};
+    if !tray_enabled() {
+        return Ok(());
+    }
+    let Some(_instance) = acquire_tray_instance() else {
+        return Ok(()); // 이 세션에 이미 떠 있다
+    };
+    let wake_name = wide(TRAY_WAKE);
+    let wake = OwnedHandle(unsafe { CreateEventW(std::ptr::null(), 0, 0, wake_name.as_ptr()) });
+
+    let first = TrayView {
+        tone: Tone::Idle,
+        state_line: "확인하는 중…".into(),
+        watch_line: " ".into(),
+        tooltip: "Tailscale Force Connect\n확인하는 중…".into(),
+    };
+    let taskbar = taskbar_window();
+    let ui = new_status_tray(&first)?;
+    TRAY.with(|cell| *cell.borrow_mut() = Some(TrayState { ui, tone: first.tone, taskbar }));
+
+    std::thread::spawn(move || {
+        let wake = wake;
+        let mut last_at: Option<u64> = None;
+        let mut woke: Option<Instant> = None;
+        loop {
+            if !tray_enabled() {
+                let _ = slint::invoke_from_event_loop(|| {
+                    let _ = slint::quit_event_loop();
+                });
+                return;
+            }
+            let snap = collect_snapshot();
+            // 감시 작업이 파일을 쓰는 순간이라 읽지 못했으면 지난 값을 쓴다.
+            if snap.watch_at.is_some() {
+                last_at = snap.watch_at;
+            }
+            let settle = snap.watch_interval.map(|i| Duration::from_secs(watch_stale_after(i)));
+            let settling = just_started(snap.watch_interval) || woke.zip(settle).is_some_and(|(w, s)| w.elapsed() < s);
+            let view = tray_view(&snap, &watch_health(snap.watch_interval, last_at, unix_now(), settling));
+            let taskbar = taskbar_window();
+            if slint::invoke_from_event_loop(move || apply_tray_view(view, taskbar)).is_err() {
+                return; // 이벤트 루프가 끝났다
+            }
+            let before = SystemTime::now();
+            if wake.0.is_null() {
+                std::thread::sleep(TRAY_POLL);
+            } else {
+                unsafe { WaitForSingleObject(wake.0, TRAY_POLL.as_millis() as u32) };
+            }
+            // 기다린 시간이 훨씬 길면 절전에서 깨어난 것이다. 감시 작업도 곧 다시 도니 잠시 판단을 미룬다.
+            if SystemTime::now().duration_since(before).is_ok_and(|d| d > TRAY_POLL + Duration::from_secs(60)) {
+                woke = Some(Instant::now());
+            }
+        }
+    });
+
+    slint::run_event_loop_until_quit()?;
+    TRAY.with(|cell| cell.borrow_mut().take());
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1525,6 +2095,146 @@ mod tests {
         assert_eq!(launch_mode(&a(&["tailscale-force-connect:x", "--notify-update"])), LaunchMode::Window);
         assert_eq!(launch_mode(&a(&["TAILSCALE-FORCE-CONNECT:--watch-notify"])), LaunchMode::Window);
         assert_eq!(launch_mode(&a(&["\"tailscale-force-connect:x\"", "--watch-notify"])), LaunchMode::Window);
+        assert_eq!(launch_mode(&a(&["--tray"])), LaunchMode::Tray);
+        assert_eq!(launch_mode(&a(&["tailscale-force-connect:x", "--tray"])), LaunchMode::Window);
+    }
+
+    #[test]
+    fn watch_interval_and_health() {
+        // install.ps1과 같은 주기
+        assert_eq!(watch_interval_minutes(60, 3), Some(1));
+        assert_eq!(watch_interval_minutes(60, 0), Some(5));
+        assert_eq!(watch_interval_minutes(5, 0), Some(1));
+        assert_eq!(watch_interval_minutes(0, 3), Some(1));
+        assert_eq!(watch_interval_minutes(0, 0), None);
+        assert_eq!(watch_stale_after(1), 300);
+        assert_eq!(watch_stale_after(5), 1020);
+
+        let now = 1_000_000;
+        assert_eq!(watch_health(None, Some(now), now, false), WatchHealth::Off);
+        assert_eq!(watch_health(Some(1), Some(now - 20), now, false), WatchHealth::Alive(20));
+        assert_eq!(watch_health(Some(1), Some(now - 300), now, false), WatchHealth::Alive(300));
+        assert_eq!(watch_health(Some(1), Some(now - 301), now, false), WatchHealth::Stale(Some(5)));
+        assert_eq!(watch_health(Some(5), Some(now - 900), now, false), WatchHealth::Alive(900), "5분 주기는 17분까지 정상");
+        assert_eq!(watch_health(Some(1), None, now, false), WatchHealth::Stale(None));
+        // 켜진 직후·깨어난 직후에는 낡은 기록이어도 기다린다
+        assert_eq!(watch_health(Some(1), Some(now - 3600), now, true), WatchHealth::Pending);
+        assert_eq!(watch_health(Some(1), None, now, true), WatchHealth::Pending);
+        // 시계가 뒤로 갔으면 방금 확인한 것으로 본다
+        assert_eq!(watch_health(Some(1), Some(now + 30), now, false), WatchHealth::Alive(0));
+    }
+
+    #[test]
+    fn watch_texts() {
+        assert_eq!(ago_label(45), "45초");
+        assert_eq!(ago_label(12 * 60 + 5), "12분");
+        assert_eq!(ago_label(3 * 3600), "3시간");
+        assert_eq!(ago_label(3 * 86400), "3일");
+        assert_eq!(watch_window_text(&WatchHealth::Off, None), (String::new(), 1));
+        let (t, tone) = watch_window_text(&WatchHealth::Alive(20), Some(1));
+        assert_eq!(tone, 0);
+        assert_eq!(t, "감시 작업 정상: 20초 전에 확인했습니다(1분마다 확인).");
+        let (t, tone) = watch_window_text(&WatchHealth::Stale(Some(12)), Some(1));
+        assert_eq!(tone, 2);
+        assert!(t.contains("12분 동안 돌지 않았습니다") && t.contains("[적용]"), "{t}");
+        assert_eq!(watch_window_text(&WatchHealth::Stale(None), Some(1)).1, 2);
+        assert_eq!(watch_window_text(&WatchHealth::Pending, Some(1)).1, 1);
+    }
+
+    fn snap(state: &'static str, title: &str, detail: &str) -> Snapshot {
+        Snapshot {
+            installed: true,
+            settings_found: true,
+            reconnect_minutes: 60,
+            heal_found: true,
+            heal_minutes: 3,
+            state,
+            title: title.into(),
+            detail: detail.into(),
+            log: None,
+            fast_startup: false,
+            active_peers: Vec::new(),
+            watch_interval: Some(1),
+            watch_at: None,
+            stopped_for: None,
+        }
+    }
+
+    #[test]
+    fn tray_views() {
+        let ok = WatchHealth::Alive(20);
+        let v = tray_view(&snap("running", "연결됨", "my-pc · 100.101.102.103"), &ok);
+        assert_eq!(v.tone, Tone::Ok);
+        assert_eq!(v.state_line, "연결됨 · my-pc · 100.101.102.103");
+        assert_eq!(v.watch_line, "감시 정상 · 20초 전 확인");
+        assert_eq!(v.tooltip, "Tailscale Force Connect\n연결됨 · my-pc · 100.101.102.103\n감시 정상 · 20초 전 확인");
+
+        // 연결돼 있어도 감시 작업이 멈췄으면 빨강: 이 아이콘이 알려야 할 가장 중요한 상태
+        let v = tray_view(&snap("running", "연결됨", "my-pc"), &WatchHealth::Stale(Some(12)));
+        assert_eq!(v.tone, Tone::Bad);
+        assert_eq!(v.watch_line, "감시 작업이 12분 동안 돌지 않음");
+        assert_eq!(tray_view(&snap("running", "연결됨", "my-pc"), &WatchHealth::Stale(None)).tone, Tone::Bad);
+        // 켜진 직후·감시를 끈 경우는 연결 상태대로
+        assert_eq!(tray_view(&snap("running", "연결됨", "my-pc"), &WatchHealth::Pending).tone, Tone::Ok);
+        let v = tray_view(&snap("running", "연결됨", "my-pc"), &WatchHealth::Off);
+        assert_eq!((v.tone, v.watch_line.as_str()), (Tone::Ok, "자동 재연결·멈춤 감시 꺼짐"));
+
+        // 직접 끊음: 다시 연결까지 남은 시간
+        let mut s = snap("stopped", "끊김", "직접 끊은 상태입니다.");
+        s.stopped_for = Some(20);
+        let v = tray_view(&s, &ok);
+        assert_eq!((v.tone, v.state_line.as_str()), (Tone::Warn, "끊김 · 약 40분 뒤 다시 연결"));
+        s.stopped_for = Some(61);
+        assert_eq!(tray_view(&s, &ok).state_line, "끊김 · 곧 다시 연결");
+        s.stopped_for = None;
+        assert_eq!(tray_view(&s, &ok).state_line, "끊김 · 1시간 뒤 다시 연결");
+        s.reconnect_minutes = 0;
+        assert_eq!(tray_view(&s, &ok).state_line, "끊김 · 다음 부팅 때 연결");
+
+        let v = tray_view(&snap("stuck", "연결 안 됨", "서버와 연결되지 않았습니다…"), &ok);
+        assert_eq!((v.tone, v.state_line.as_str()), (Tone::Warn, "연결 안 됨 · 다른 기기에서는 offline"));
+        assert_eq!(tray_view(&snap("stuck", "응답 없음", "…"), &ok).state_line, "응답 없음 · Tailscale이 답하지 않음");
+        assert_eq!(tray_view(&snap("login", "로그인 필요", "…"), &ok).tone, Tone::Bad);
+        assert_eq!(tray_view(&snap("missing", "Tailscale 없음", "…"), &ok).tone, Tone::Bad);
+        let v = tray_view(&snap("unknown", "연결하는 중…", ""), &ok);
+        assert_eq!((v.tone, v.state_line.as_str()), (Tone::Idle, "연결하는 중…"));
+
+        let mut s = snap("running", "연결됨", "my-pc");
+        s.installed = false;
+        let v = tray_view(&s, &WatchHealth::Off);
+        assert_eq!((v.tone, v.watch_line.as_str()), (Tone::Bad, "설치되지 않음 · 관리 창에서 설치"));
+    }
+
+    #[test]
+    fn tooltip_limit() {
+        assert_eq!(truncate_utf16("짧은 글", 127), "짧은 글");
+        let long = "가".repeat(200);
+        let t = truncate_utf16(&long, 127);
+        assert_eq!(t.encode_utf16().count(), 127);
+        assert!(t.ends_with('…'));
+        // 서로게이트 쌍(UTF-16 두 칸)을 반으로 자르지 않는다
+        let t = truncate_utf16(&"😀".repeat(100), 9);
+        assert_eq!(t, "😀😀😀😀…");
+    }
+
+    #[test]
+    fn status_icon_pixels() {
+        for size in [16u32, 20, 24, 32] {
+            for tone in [Tone::Ok, Tone::Warn, Tone::Bad, Tone::Idle] {
+                let buf = render_status_icon(size, tone);
+                let px = buf.as_slice();
+                let at = |x: u32, y: u32| px[(y * size + x) as usize];
+                assert_eq!(at(0, 0).a, 0, "{size}px 모서리는 투명");
+                let center = at(size / 2, size / 2);
+                assert_eq!([center.r, center.g, center.b, center.a], [tone_rgb(tone)[0], tone_rgb(tone)[1], tone_rgb(tone)[2], 255]);
+                let edge = at(size / 2, 0);
+                assert_eq!([edge.r, edge.g, edge.b, edge.a], [0x14, 0x20, 0x2A, 255], "{size}px 위쪽 가운데는 어두운 바탕");
+            }
+        }
+        // 32px에서 가운데로부터 12.5px 떨어진 곳은 밝은 고리
+        let buf = render_status_icon(32, Tone::Ok);
+        let ring = buf.as_slice()[(16 * 32 + 28) as usize];
+        assert_eq!([ring.r, ring.g, ring.b], [0xCF, 0xE3, 0xD8]);
     }
 
     #[test]
