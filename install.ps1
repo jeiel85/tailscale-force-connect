@@ -12,7 +12,7 @@ $taskName    = 'Tailscale Auto Connect'
 $eventSource = 'TailscaleForceConnect'
 $logFile     = Join-Path $dir 'install.log'
 $watchTask   = 'Tailscale Auto Reconnect'
-$version     = '1.9.0'
+$version     = '1.10.0'
 $appDir      = Join-Path $env:ProgramFiles 'Tailscale Force Connect'   # 관리 앱(GUI)과 스크립트 원본
 $appExe      = 'TailscaleForceConnect.exe'
 $shortcut    = Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu\Programs\Tailscale Force Connect.lnk'
@@ -237,10 +237,11 @@ try {
     if ($fromApp) {
         Write-Report "관리 앱: $appDir"
     } elseif (Test-Path -LiteralPath $srcExe) {
-        # 업데이트할 때 관리 창이 열려 있으면 실행 파일을 덮어쓸 수 없으므로 닫는다.
+        # 업데이트할 때 관리 창이나 트레이 아이콘(모든 로그인 세션)이 떠 있으면 실행 파일을 덮어쓸 수 없으므로 닫는다.
+        # 트레이는 1분 안에 연결 알림 작업이 새 버전으로 다시 띄운다(업데이트 뒤 다시 열린 관리 창은 바로 띄운다).
         $running = Get-Process -Name ([IO.Path]::GetFileNameWithoutExtension($appExe)) -ErrorAction SilentlyContinue |
             Where-Object { $_.Path -and ($_.Path -ieq (Join-Path $appDir $appExe)) }
-        if ($running) { $running | Stop-Process -Force; Start-Sleep -Seconds 1; Write-Report '열려 있던 관리 창을 닫음 (업데이트)' }
+        if ($running) { $running | Stop-Process -Force; Start-Sleep -Seconds 1; Write-Report '열려 있던 관리 창·트레이 아이콘을 닫음 (업데이트)' }
         New-Item -ItemType Directory -Force -Path $appDir | Out-Null
         $appFiles = @($appExe, 'install.ps1', 'uninstall.ps1', 'connect.ps1', 'update.ps1')
         foreach ($f in $appFiles) {
@@ -269,7 +270,7 @@ try {
     # 0-2) 새 버전 Windows 알림. 관리 앱이 설치된 경우에만 등록한다.
     #      - 시작 메뉴 바로가기에 앱 ID를 넣어야 알림이 이 앱 이름·아이콘으로 표시된다.
     #      - 알림을 누르면 tailscale-force-connect: 링크로 관리 창을 연다.
-    #      - 확인은 로그인한 사용자 권한으로 도는 작업이 한다(상주 프로세스 없음).
+    #      - 확인은 로그인한 사용자 권한으로 도는 작업이 한다. 상주하는 것은 상태 아이콘(트레이)뿐이다.
     $installedExe = Join-Path $appDir $appExe
     if (Test-Path -LiteralPath $installedExe) {
         if (-not (Test-Path -LiteralPath $shortcut)) {
@@ -299,13 +300,15 @@ try {
         Register-ScheduledTask -TaskName $notifyTask -Action $nAction -Trigger @($nLogon, $nDaily) -Principal $nPrincipal -Settings $nSettings -Description '새 버전이 있으면 로그인 직후에는 관리 창을 열어 1분 뒤 자동으로 업데이트하고(관리자 권한 승인 필요), 그 밖에는 Windows 알림으로 알린다.' -Force | Out-Null
         Write-Report "새 버전 확인: 로그인 2분 뒤(관리 창을 열어 1분 뒤 자동 업데이트)와 매일 12:30(알림) (예약 작업 $notifyTask)"
 
-        # 연결 끊김·재연결 알림: 로그인한 사용자 권한으로 1분마다 상태만 확인한다(창 없음, 상주 프로세스 없음).
+        # 연결 끊김·재연결 알림: 로그인한 사용자 권한으로 1분마다 상태만 확인한다(창 없음).
+        # 상태 아이콘(트레이, --tray)이 떠 있지 않으면 이 작업이 띄운다: 로그인 직후, 업데이트로 닫힌 뒤, 오류로 끝난 뒤.
+        # 따로 시작 프로그램(Run)에 등록하지 않는다. 사용자는 관리 창의 '트레이 아이콘' 선택으로 끈다.
         # 시간 기준 반복 트리거는 재부팅 뒤에도 이어지고, 로그인해 있는 동안에만 실행된다.
         $aAction  = New-ScheduledTaskAction -Execute $installedExe -Argument '--watch-notify'
         $aTrigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) -RepetitionInterval (New-TimeSpan -Minutes 1)
         $aSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Minutes 1) -MultipleInstances IgnoreNew
-        Register-ScheduledTask -TaskName $alertTask -Action $aAction -Trigger $aTrigger -Principal $nPrincipal -Settings $aSettings -Description '1분마다 Tailscale 연결 상태를 확인해, 끊기거나 다시 연결되면 Windows 알림으로 알린다.' -Force | Out-Null
-        Write-Report "연결 알림: 1분마다 확인해 끊김·재연결을 알림 (예약 작업 $alertTask)"
+        Register-ScheduledTask -TaskName $alertTask -Action $aAction -Trigger $aTrigger -Principal $nPrincipal -Settings $aSettings -Description '1분마다 Tailscale 연결 상태를 확인해, 끊기거나 다시 연결되면 Windows 알림으로 알린다. 상태 아이콘(트레이)이 떠 있지 않으면 다시 띄운다.' -Force | Out-Null
+        Write-Report "연결 알림·트레이 아이콘: 1분마다 확인해 끊김·재연결을 알리고 트레이 아이콘을 띄움 (예약 작업 $alertTask)"
     }
 
     # 1) 스크립트 복사 (새 파일은 폴더의 제한된 ACL을 물려받는다)

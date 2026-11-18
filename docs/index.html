@@ -4,363 +4,797 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>tailscale-force-connect</title>
-<meta name="description" content="Windows에서 Tailscale을 끊어 둔 채로 재부팅해도 부팅할 때마다 다시 연결합니다. PowerShell 스크립트와 예약 작업만 씁니다.">
+<meta name="description" content="Windows에서 Tailscale을 끊어 둔 채로 재부팅해도 부팅할 때마다 다시 연결합니다. 직접 끊으면 1시간 뒤, 연결된 척 멈추면 3분 뒤 되살리고, 작업 표시줄 아이콘으로 늘 상태를 보여 줍니다.">
+<meta name="theme-color" content="#0B1218">
 <meta property="og:title" content="tailscale-force-connect">
-<meta property="og:description" content="꺼 둔 채로 재부팅해도, 다시 연결됩니다. Windows용 Tailscale 부팅 시 자동 재연결.">
+<meta property="og:description" content="꺼 둔 채로 재부팅해도, 다시 연결됩니다. Windows용 Tailscale 자동 재연결과 상태 아이콘.">
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://jeiel85.github.io/tailscale-force-connect/">
 <meta property="og:image" content="https://jeiel85.github.io/tailscale-force-connect/cover.png">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
 <meta name="twitter:card" content="summary_large_image">
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='9' fill='%231B8F69'/%3E%3Ccircle cx='16' cy='16' r='14' fill='none' stroke='%2314202B' stroke-width='3'/%3E%3C/svg%3E">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%2314202A'/%3E%3Ccircle cx='16' cy='16' r='12.4' fill='none' stroke='%23CFE3D8' stroke-width='2.7'/%3E%3Ccircle cx='16' cy='16' r='8.6' fill='%233CC293'/%3E%3C/svg%3E">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Black+Han+Sans&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans+KR:wght@400;500;700&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Black+Han+Sans&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans+KR:wght@400;500;600;700&display=swap" rel="stylesheet">
+<script>
+  // 고른 테마(밝게/어둡게)를 그리기 전에 적용한다. ?theme=dark|light는 공유 이미지(cover.png)를 찍을 때 쓴다.
+  (function () {
+    var t = null, q = null;
+    try { q = new URLSearchParams(location.search); t = q.get('theme') || localStorage.getItem('tfc-theme'); } catch (e) { }
+    if (t === 'dark' || t === 'light') document.documentElement.setAttribute('data-theme', t);
+    if (q && q.has('cover')) document.documentElement.setAttribute('data-cover', '');
+  })();
+</script>
 <style>
   :root {
-    --bg: #DDE3E8;
-    --panel: #F7F9FA;
-    --ink: #14202B;
-    --muted: #4D5B68;
-    --rule: #A9B4BE;
-    --amber: #D98E1F;
-    --green: #1B8F69;
-    --screen: #101820;
-    --screen-ink: #CFE3D8;
-    --screen-dim: #6F8A7E;
+    --bg: #EEF2F5;
+    --bg-2: #E5EBF0;
+    --panel: #FFFFFF;
+    --panel-2: #F4F7F9;
+    --ink: #12202B;
+    --muted: #55636F;
+    --rule: #D3DCE3;
+    --rule-2: #BFCAD3;
+    --green: #178A63;
+    --amber: #B06C0B;
+    --red: #C2412D;
     --focus: #2F6FD6;
+    --shadow: 0 1px 0 rgba(18, 32, 43, .04), 0 22px 44px -30px rgba(18, 32, 43, .4);
+    /* 상태 불빛: 앱과 트레이 아이콘이 쓰는 색 */
+    --led-ok: #3CC293;
+    --led-warn: #F0A63A;
+    --led-bad: #EB4B3F;
+    --led-idle: #8A98A3;
+    /* 맨 위 무대와 로그 화면은 테마와 상관없이 어둡다 */
+    --st-bg: #0B1218;
+    --st-ink: #E8EEF2;
+    --st-muted: #9AABB7;
+    --st-rule: #22303A;
+    --st-panel: #111B22;
+    --st-panel-2: #16232C;
+    --screen: #0A1217;
+    --screen-ink: #CFE3D8;
+    --screen-dim: #62796F;
+    --screen-ok: #6FE0AE;
+    --screen-warn: #F3C077;
+    --mono: "IBM Plex Mono", ui-monospace, Consolas, monospace;
+    --sans: "IBM Plex Sans KR", "Malgun Gothic", system-ui, sans-serif;
+    --display: "Black Han Sans", "IBM Plex Sans KR", sans-serif;
     color-scheme: light;
   }
   @media (prefers-color-scheme: dark) {
     :root:not([data-theme="light"]) {
-      --bg: #11181E; --panel: #1A232B; --ink: #E4EAEF; --muted: #9AA8B4; --rule: #34424E;
-      --amber: #F0A63A; --green: #3CC293; --screen: #0A0F14; --screen-ink: #CFE3D8; --screen-dim: #5E7469;
-      --focus: #7FA8F0; color-scheme: dark;
+      --bg: #0A1015; --bg-2: #0E161C; --panel: #121A21; --panel-2: #17222A; --ink: #E6ECF0; --muted: #95A4B0;
+      --rule: #212D36; --rule-2: #2D3B46; --green: #3CC293; --amber: #F0A63A; --red: #F07A6A; --focus: #7FA8F0;
+      --shadow: 0 1px 0 rgba(0, 0, 0, .2), 0 26px 50px -30px rgba(0, 0, 0, .8);
+      color-scheme: dark;
     }
   }
   :root[data-theme="dark"] {
-    --bg: #11181E; --panel: #1A232B; --ink: #E4EAEF; --muted: #9AA8B4; --rule: #34424E;
-    --amber: #F0A63A; --green: #3CC293; --screen: #0A0F14; --screen-ink: #CFE3D8; --screen-dim: #5E7469;
-    --focus: #7FA8F0; color-scheme: dark;
+    --bg: #0A1015; --bg-2: #0E161C; --panel: #121A21; --panel-2: #17222A; --ink: #E6ECF0; --muted: #95A4B0;
+    --rule: #212D36; --rule-2: #2D3B46; --green: #3CC293; --amber: #F0A63A; --red: #F07A6A; --focus: #7FA8F0;
+    --shadow: 0 1px 0 rgba(0, 0, 0, .2), 0 26px 50px -30px rgba(0, 0, 0, .8);
+    color-scheme: dark;
   }
 
   * { box-sizing: border-box; }
-  html { -webkit-text-size-adjust: 100%; }
+  html { -webkit-text-size-adjust: 100%; scroll-behavior: smooth; scroll-padding-top: 16px; }
   body {
     margin: 0;
     background: var(--bg);
     color: var(--ink);
-    font: 400 17px/1.7 "IBM Plex Sans KR", system-ui, sans-serif;
+    font: 400 17px/1.7 var(--sans);
     word-break: keep-all;
     overflow-wrap: anywhere;
+    -webkit-font-smoothing: antialiased;
   }
   a { color: inherit; text-underline-offset: 3px; }
-  :focus-visible { outline: 3px solid var(--focus); outline-offset: 3px; border-radius: 4px; }
-  code, pre, .mono { font-family: "IBM Plex Mono", ui-monospace, monospace; }
-  code { font-size: .92em; }
+  :focus-visible { outline: 3px solid var(--focus); outline-offset: 3px; border-radius: 6px; }
+  code, pre, .mono { font-family: var(--mono); }
+  code { font-size: .9em; }
+  .wrap { max-width: 1160px; margin: 0 auto; padding: 0 28px; }
+  .ico { display: inline-block; flex: none; vertical-align: middle; }
+  .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 
-  .wrap { max-width: 1080px; margin: 0 auto; padding: 0 24px; }
+  /* ================= 무대(머리글 + 첫 화면) ================= */
+  .stage {
+    position: relative;
+    background: var(--st-bg);
+    color: var(--st-ink);
+    overflow: hidden;
+    isolation: isolate;
+    border-bottom: 1px solid var(--st-rule);
+  }
+  .stage::before {
+    /* 점 격자 */
+    content: ""; position: absolute; inset: 0; z-index: -2;
+    background-image: radial-gradient(rgba(207, 227, 216, .09) 1px, transparent 1.2px);
+    background-size: 26px 26px;
+    -webkit-mask-image: radial-gradient(ellipse 80% 70% at 70% 45%, #000 20%, transparent 75%);
+            mask-image: radial-gradient(ellipse 80% 70% at 70% 45%, #000 20%, transparent 75%);
+  }
+  .stage::after {
+    /* 상태 불빛이 번지는 빛 */
+    content: ""; position: absolute; z-index: -1;
+    width: 900px; height: 900px; right: -180px; top: -160px;
+    background: radial-gradient(circle, rgba(60, 194, 147, .20) 0%, rgba(60, 194, 147, .06) 38%, transparent 66%);
+    pointer-events: none;
+  }
+  .stage a { color: var(--st-ink); }
 
-  header.top { border-bottom: 1px solid var(--rule); }
-  header.top .wrap { display: flex; align-items: center; justify-content: space-between; height: 60px; gap: 16px; }
-  .brand { font-family: "IBM Plex Mono", monospace; font-weight: 500; font-size: 15px; text-decoration: none; display: inline-flex; align-items: center; gap: 10px; }
-  .brand-dot { width: 10px; height: 10px; border-radius: 50%; background: var(--green); box-shadow: 0 0 0 3px color-mix(in srgb, var(--green) 25%, transparent); }
-  .top-link { font-size: 15px; font-weight: 500; }
+  header.top .wrap { display: flex; align-items: center; gap: 22px; height: 68px; }
+  .brand { display: inline-flex; align-items: center; gap: 10px; font: 500 15px/1 var(--mono); text-decoration: none; letter-spacing: -.01em; }
+  .brand .ico { width: 24px; height: 24px; color: var(--led-ok); filter: drop-shadow(0 0 8px rgba(60, 194, 147, .45)); }
+  .nav { display: flex; gap: 22px; margin-left: auto; font-size: 14.5px; }
+  .nav a { text-decoration: none; color: var(--st-muted); }
+  .nav a:hover { color: var(--st-ink); }
+  .top-actions { display: flex; align-items: center; gap: 10px; }
+  .gh {
+    display: inline-flex; align-items: center; gap: 8px; height: 36px; padding: 0 14px; border-radius: 999px;
+    border: 1px solid var(--st-rule); font-size: 14px; font-weight: 500; text-decoration: none; background: rgba(255, 255, 255, .02);
+  }
+  .gh:hover { border-color: #3A4A56; }
+  .theme-btn {
+    width: 36px; height: 36px; border-radius: 50%; border: 1px solid var(--st-rule); background: rgba(255, 255, 255, .02);
+    color: var(--st-ink); display: grid; place-items: center; cursor: pointer; padding: 0;
+  }
+  .theme-btn svg { width: 17px; height: 17px; }
+  .theme-btn .moon { display: none; }
+  :root[data-theme="dark"] .theme-btn .sun { display: none; }
+  :root[data-theme="dark"] .theme-btn .moon { display: block; }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) .theme-btn .sun { display: none; }
+    :root:not([data-theme="light"]) .theme-btn .moon { display: block; }
+  }
 
-  /* ---------- hero ---------- */
-  .hero { display: grid; grid-template-columns: 1.05fr 1fr; gap: 56px; align-items: center; padding-block: 72px 88px; }
+  .hero { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.04fr); gap: 56px; align-items: center; padding-block: 52px 84px; }
+  .pill {
+    display: inline-flex; align-items: center; gap: 10px; padding: 5px 14px 5px 6px; border-radius: 999px;
+    border: 1px solid rgba(60, 194, 147, .35); background: rgba(60, 194, 147, .08);
+    font-size: 14px; text-decoration: none; color: var(--st-ink); margin-bottom: 26px;
+  }
+  .pill b { font: 600 11.5px/1 var(--mono); letter-spacing: .08em; background: var(--led-ok); color: #06231A; padding: 5px 8px; border-radius: 999px; }
+  .pill:hover { border-color: rgba(60, 194, 147, .6); }
   .hero h1 {
-    font-family: "Black Han Sans", "IBM Plex Sans KR", sans-serif;
-    font-weight: 400;
-    font-size: clamp(2.5rem, 5.6vw, 4.3rem);
-    line-height: 1.12;
-    letter-spacing: -0.01em;
+    font-family: var(--display); font-weight: 400;
+    font-size: clamp(2.6rem, 5.3vw, 4.5rem); line-height: 1.1; letter-spacing: -.005em;
     margin: 0 0 24px;
   }
-  .hero h1 .again { color: var(--green); }
-  .lede { font-size: 18px; color: var(--muted); margin: 0 0 28px; max-width: 34em; }
-  .lede strong { color: var(--ink); font-weight: 500; }
-  .hero-actions { display: flex; flex-wrap: wrap; gap: 12px; }
-  .btn {
-    font: 500 16px/1 "IBM Plex Sans KR", sans-serif;
-    display: inline-flex; align-items: center; justify-content: center; gap: 8px;
-    min-height: 46px; padding: 0 20px; border-radius: 10px;
-    border: 1.5px solid var(--ink); background: var(--ink); color: var(--bg);
-    text-decoration: none; cursor: pointer;
+  .hero h1 em {
+    font-style: normal; color: var(--led-ok);
+    text-shadow: 0 0 34px rgba(60, 194, 147, .45);
   }
-  .btn.ghost { background: transparent; color: var(--ink); }
+  .lede { font-size: 18px; color: var(--st-muted); margin: 0 0 30px; max-width: 32em; }
+  .lede strong { color: var(--st-ink); font-weight: 600; }
 
-  /* ---------- signature: device panel ---------- */
-  .device {
-    background: var(--panel);
-    border: 1.5px solid var(--rule);
-    border-radius: 18px;
-    padding: 20px;
-    box-shadow: 0 1px 0 var(--rule), 0 24px 48px -28px rgba(20, 32, 43, .45);
+  .quick { max-width: 560px; }
+  .quick-label { display: flex; justify-content: space-between; gap: 12px; font-size: 13.5px; color: var(--st-muted); margin-bottom: 8px; }
+  .quick-label span:first-child { color: var(--st-ink); font-weight: 600; }
+  .cmd {
+    display: flex; align-items: stretch; background: var(--screen); color: var(--screen-ink);
+    border: 1px solid var(--st-rule); border-radius: 12px; overflow: hidden;
   }
-  .device-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 16px; }
-  .device-name { font-family: "IBM Plex Mono", monospace; font-size: 13px; color: var(--muted); letter-spacing: .04em; }
-  .status { display: inline-flex; align-items: center; gap: 10px; font-weight: 500; font-size: 15px; }
-  .led { width: 14px; height: 14px; border-radius: 50%; background: var(--green); box-shadow: 0 0 10px 1px var(--green); transition: background .25s, box-shadow .25s; }
-  .led[data-state="stopped"] { background: var(--amber); box-shadow: 0 0 10px 1px var(--amber); }
-  .led[data-state="off"] { background: var(--rule); box-shadow: none; }
-  .led[data-state="booting"] { background: var(--amber); box-shadow: none; animation: blink .5s steps(2) infinite; }
-  @keyframes blink { 50% { opacity: .25; } }
-
-  .screen {
-    background: var(--screen);
-    color: var(--screen-ink);
-    border-radius: 10px;
-    padding: 14px 16px;
-    height: 216px;
-    overflow: hidden;
-    font: 400 13.5px/1.75 "IBM Plex Mono", monospace;
-    position: relative;
-    transition: filter .35s, opacity .35s;
-  }
-  .screen.off { opacity: .15; filter: brightness(.3); }
-  .screen ol { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; justify-content: flex-end; min-height: 100%; }
-  .screen li { white-space: pre-wrap; }
-  .screen .t { color: var(--screen-dim); }
-  .screen .ok { color: #6FE0AE; }
-  .screen .warn { color: #F3C077; }
-
-  .controls { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 14px; }
-  .ctl {
-    font: 500 15px/1.2 "IBM Plex Sans KR", sans-serif;
-    min-height: 48px; padding: 10px 14px; border-radius: 10px; cursor: pointer;
-    border: 1.5px solid var(--rule); background: var(--bg); color: var(--ink);
-  }
-  .ctl.reboot { background: var(--ink); color: var(--panel); border-color: var(--ink); }
-  .ctl:disabled { opacity: .45; cursor: not-allowed; }
-  .install-toggle { display: flex; align-items: center; gap: 10px; margin-top: 14px; font-size: 14.5px; color: var(--muted); cursor: pointer; }
-  .install-toggle input { width: 18px; height: 18px; accent-color: var(--green); margin: 0; }
-  .device-note { margin: 10px 0 0; font-size: 13px; color: var(--muted); }
-
-  /* ---------- sections ---------- */
-  section.block { border-top: 1px solid var(--rule); padding: 64px 0; }
-  .block-grid { display: grid; grid-template-columns: 260px 1fr; gap: 40px; }
-  .block h2 { font-size: 22px; font-weight: 700; line-height: 1.35; margin: 0; }
-  .block .side-note { color: var(--muted); font-size: 15px; margin: 10px 0 0; }
-
-  .methods { display: grid; gap: 28px; min-width: 0; }
-  .method { min-width: 0; }
-  .method h3 { font-size: 17px; font-weight: 700; margin: 0 0 4px; }
-  .method p { margin: 0 0 12px; }
-  .method.notes { border-top: 1px solid var(--rule); padding-top: 22px; color: var(--muted); font-size: 15px; }
-  .method.notes p { margin: 0 0 10px; }
-  .method.notes strong { color: var(--ink); font-weight: 500; }
-  .cmd { display: flex; align-items: stretch; background: var(--screen); color: var(--screen-ink); border-radius: 10px; overflow: hidden; }
-  .cmd pre { margin: 0; padding: 12px 16px; flex: 1; overflow-x: auto; font-size: 14px; line-height: 1.6; }
+  .cmd pre { margin: 0; padding: 13px 16px; flex: 1; min-width: 0; overflow-x: auto; font-size: 14px; line-height: 1.6; }
+  .cmd pre::before { content: "> "; color: var(--led-ok); }
   .copy {
-    font: 500 13px/1 "IBM Plex Sans KR", sans-serif; flex: none;
-    background: transparent; color: var(--screen-ink); border: 0; border-left: 1px solid #2A3844;
-    padding: 0 16px; cursor: pointer; min-width: 72px;
+    font: 600 13px/1 var(--sans); flex: none; min-width: 76px; padding: 0 16px; cursor: pointer;
+    background: transparent; color: var(--screen-ink); border: 0; border-left: 1px solid var(--st-rule);
   }
-  .copy:hover { background: #1B2731; }
-  .hint { font-size: 15px; color: var(--muted); margin: 10px 0 0; }
+  .copy:hover { background: #15212A; }
+  .copy.done { color: var(--led-ok); }
+  .quick-foot { font-size: 13.5px; color: var(--st-muted); margin: 10px 0 0; }
+  .hero-links { display: flex; flex-wrap: wrap; gap: 10px 22px; margin-top: 26px; font-size: 15px; font-weight: 500; }
+  .hero-links a { text-decoration: none; display: inline-flex; align-items: center; gap: 6px; }
+  .hero-links a:hover { text-decoration: underline; }
+  .badges { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 30px; padding: 0; list-style: none; }
+  .badges li { font-size: 13px; color: var(--st-muted); border: 1px solid var(--st-rule); border-radius: 999px; padding: 4px 12px; }
 
-  .compare { width: 100%; border-collapse: collapse; font-size: 15.5px; }
-  .compare th, .compare td { text-align: left; vertical-align: top; padding: 14px 12px; border-bottom: 1px solid var(--rule); }
-  .compare thead th { font-size: 13px; font-weight: 500; color: var(--muted); letter-spacing: .03em; border-bottom: 1.5px solid var(--ink); }
-  .compare tbody th { font-weight: 500; white-space: nowrap; }
-  .compare tr.mine th, .compare tr.mine td { background: color-mix(in srgb, var(--green) 10%, transparent); }
+  /* ---------- 시뮬레이터: 작은 Windows 바탕화면 ---------- */
+  .sim {
+    position: relative;
+    background: linear-gradient(180deg, var(--st-panel-2), var(--st-panel));
+    border: 1px solid var(--st-rule); border-radius: 22px; padding: 16px;
+    box-shadow: 0 40px 80px -40px rgba(0, 0, 0, .9), 0 0 0 1px rgba(255, 255, 255, .02) inset;
+  }
+  .sim-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 2px 4px 12px; }
+  .sim-title { font: 600 13px/1 var(--sans); letter-spacing: .02em; color: var(--st-muted); }
+  .sim-state { display: inline-flex; align-items: center; gap: 9px; font-weight: 600; font-size: 15px; }
+  .led { width: 12px; height: 12px; border-radius: 50%; background: var(--c, var(--led-ok)); box-shadow: 0 0 12px 1px var(--c, var(--led-ok)); transition: background .3s, box-shadow .3s; }
+
+  .monitor { border-radius: 12px; overflow: hidden; border: 1px solid #26343E; background: #000; }
+  .desktop {
+    position: relative; height: 300px; overflow: hidden;
+    background:
+      radial-gradient(120% 90% at 85% 0%, rgba(60, 194, 147, .28), transparent 55%),
+      radial-gradient(90% 80% at 0% 100%, rgba(47, 111, 214, .28), transparent 60%),
+      linear-gradient(160deg, #10303A 0%, #0D1B2A 55%, #0A1220 100%);
+    transition: filter .5s;
+  }
+  .desktop.dim { filter: brightness(.35) saturate(.6); }
+  .logwin {
+    position: absolute; left: 14px; top: 14px; right: 14px; bottom: 14px;
+    max-width: 470px;
+    background: rgba(10, 18, 23, .92); border: 1px solid rgba(207, 227, 216, .08); border-radius: 10px;
+    box-shadow: 0 18px 40px -16px rgba(0, 0, 0, .7);
+    display: flex; flex-direction: column; overflow: hidden;
+  }
+  .logwin-head { display: flex; align-items: center; gap: 8px; padding: 8px 12px; font: 500 12px/1 var(--mono); color: var(--screen-dim); border-bottom: 1px solid rgba(207, 227, 216, .06); }
+  .logwin-head i { width: 8px; height: 8px; border-radius: 50%; background: #2A3A44; }
+  .logwin-head span { margin-left: 4px; }
+  .log { list-style: none; margin: 0; padding: 10px 14px 12px; flex: 1; display: flex; flex-direction: column; justify-content: flex-end; overflow: hidden; font: 400 12.8px/1.72 var(--mono); color: var(--screen-ink); }
+  .log li { white-space: pre-wrap; animation: rise .25s ease-out; }
+  .log .t { color: var(--screen-dim); }
+  .log .ok { color: var(--screen-ok); }
+  .log .warn { color: var(--screen-warn); }
+  .log .dim { color: var(--screen-dim); }
+  @keyframes rise { from { opacity: 0; transform: translateY(4px); } }
+
+  .poweroff { position: absolute; inset: 0; background: #000; display: grid; place-items: center; opacity: 0; pointer-events: none; transition: opacity .35s; z-index: 5; }
+  .poweroff.on { opacity: 1; }
+  .poweroff span { font: 500 12px/1 var(--mono); color: #2E3B44; letter-spacing: .1em; }
+  .spinner { width: 26px; height: 26px; border-radius: 50%; border: 3px solid rgba(255, 255, 255, .12); border-top-color: #C8D6DE; animation: spin .8s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  .toast {
+    position: absolute; right: 12px; bottom: 12px; width: min(300px, calc(100% - 24px)); z-index: 4;
+    background: rgba(32, 38, 43, .96); border: 1px solid rgba(255, 255, 255, .08); border-radius: 10px;
+    padding: 12px 14px; display: grid; grid-template-columns: auto 1fr; gap: 4px 10px; align-items: start;
+    box-shadow: 0 16px 36px -10px rgba(0, 0, 0, .8);
+    font-size: 12.5px; line-height: 1.5; color: #D6DEE3;
+    transform: translateY(18px); opacity: 0; pointer-events: none; transition: transform .35s cubic-bezier(.2, .9, .3, 1.2), opacity .25s;
+  }
+  .toast.show { transform: none; opacity: 1; pointer-events: auto; }
+  .toast .ico { width: 18px; height: 18px; color: var(--led-ok); margin-top: 1px; }
+  .toast small { font-size: 11.5px; color: #93A1AA; display: block; }
+  .toast b { display: block; color: #fff; font-weight: 600; font-size: 13px; margin-top: 2px; }
+
+  .taskbar {
+    display: flex; align-items: center; gap: 8px; height: 40px; padding: 0 10px;
+    background: rgba(24, 29, 34, .97); border-top: 1px solid rgba(255, 255, 255, .06); color: #E3E8EB;
+    position: relative; z-index: 6;
+  }
+  .start { display: grid; grid-template-columns: 7px 7px; gap: 2px; padding: 6px; border-radius: 6px; }
+  .start i { width: 7px; height: 7px; background: #4CC2FF; border-radius: 1px; }
+  .tb-search { height: 26px; width: 130px; border-radius: 13px; background: rgba(255, 255, 255, .06); margin-left: 4px; }
+  .tb-spacer { flex: 1; }
+  .tray { display: flex; align-items: center; gap: 4px; }
+  .tray .chev { width: 22px; height: 28px; display: grid; place-items: center; color: #C9D2D8; font-size: 11px; }
+  .tray-btn {
+    position: relative; width: 30px; height: 30px; border-radius: 6px; display: grid; place-items: center;
+    border: 0; background: transparent; cursor: pointer; padding: 0; color: var(--c, var(--led-ok));
+  }
+  .tray-btn:hover, .tray-btn[aria-expanded="true"] { background: rgba(255, 255, 255, .08); }
+  .tray-btn .ico { width: 18px; height: 18px; transition: color .3s; }
+  .tray-btn::after {
+    content: ""; position: absolute; inset: 4px; border-radius: 50%; border: 2px solid var(--c, var(--led-ok));
+    opacity: 0; pointer-events: none;
+  }
+  .tray-btn.ping::after { animation: ping 1.2s ease-out 2; }
+  @keyframes ping { 0% { opacity: .9; transform: scale(.6); } 100% { opacity: 0; transform: scale(1.6); } }
+  .tray-btn[hidden] { display: none; }
+  .glyph { width: 16px; height: 16px; color: #DDE4E8; margin: 0 4px; }
+  .clock { font-size: 11px; line-height: 1.35; text-align: right; margin-left: 6px; color: #E3E8EB; font-variant-numeric: tabular-nums; }
+
+  .tip {
+    position: absolute; right: 64px; bottom: 50px; z-index: 7;
+    background: #2B3137; color: #EEF2F4; border: 1px solid rgba(255, 255, 255, .1); border-radius: 7px;
+    padding: 7px 10px; font-size: 12px; line-height: 1.55; white-space: pre-line;
+    box-shadow: 0 12px 26px -10px rgba(0, 0, 0, .8);
+    opacity: 0; transform: translateY(4px); transition: opacity .2s, transform .2s; pointer-events: none;
+  }
+  .tip.show { opacity: 1; transform: none; }
+
+  .sim-controls { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; margin-top: 14px; }
+  .ctl {
+    font: 600 14px/1.25 var(--sans); min-height: 46px; padding: 8px 10px; border-radius: 11px; cursor: pointer;
+    border: 1px solid var(--st-rule); background: #0F181F; color: var(--st-ink);
+    transition: border-color .15s, background .15s, opacity .15s;
+  }
+  .ctl:hover:not(:disabled) { border-color: #3A4A56; background: #131F27; }
+  .ctl.primary { background: var(--st-ink); color: #0B1218; border-color: var(--st-ink); }
+  .ctl.primary:hover:not(:disabled) { background: #fff; }
+  .ctl:disabled { opacity: .38; cursor: not-allowed; }
+  .ctl small { display: block; font-weight: 400; font-size: 11.5px; color: var(--st-muted); margin-top: 2px; }
+  .ctl.primary small { color: #3B4A55; }
+  .sim-foot { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 16px; margin-top: 12px; }
+  .switch { display: inline-flex; align-items: center; gap: 10px; font-size: 14px; color: var(--st-muted); cursor: pointer; }
+  .switch input { width: 17px; height: 17px; margin: 0; accent-color: var(--led-ok); }
+  .sim-note { margin: 0; font-size: 12.5px; color: #6E808D; }
+
+  /* ================= 본문 공통 ================= */
+  section.block { padding: 96px 0; border-top: 1px solid var(--rule); }
+  section.block.alt { background: var(--bg-2); }
+  .eyebrow { font: 700 14px/1 var(--sans); letter-spacing: .02em; color: var(--green); margin: 0 0 14px; display: inline-flex; align-items: center; gap: 10px; }
+  .eyebrow::before { content: ""; width: 18px; height: 2px; background: currentColor; border-radius: 2px; }
+  .block h2 { font-family: var(--display); font-weight: 400; font-size: clamp(1.9rem, 3.6vw, 2.8rem); line-height: 1.18; margin: 0; letter-spacing: -.005em; }
+  .block .intro { color: var(--muted); font-size: 17.5px; max-width: 40em; margin: 18px 0 0; }
+  .block .intro strong { color: var(--ink); font-weight: 600; }
+  .head-row { display: flex; flex-wrap: wrap; align-items: end; justify-content: space-between; gap: 18px 40px; margin-bottom: 48px; }
+
+  /* ---------- 하는 일 ---------- */
+  .guards { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; }
+  .guard {
+    position: relative; background: var(--panel); border: 1px solid var(--rule); border-radius: 20px;
+    padding: 28px 28px 24px; box-shadow: var(--shadow); overflow: hidden;
+  }
+  .guard::before {
+    content: ""; position: absolute; left: 28px; right: 28px; top: 0; height: 3px; border-radius: 0 0 3px 3px;
+    background: var(--accent, var(--green)); opacity: .9;
+  }
+  .guard .num { font: 600 clamp(2.4rem, 4.2vw, 3.3rem)/1 var(--mono); letter-spacing: -.03em; color: var(--accent-ink, var(--green)); display: flex; align-items: baseline; gap: 10px; }
+  .guard .num small { font: 500 15px/1 var(--sans); letter-spacing: 0; color: var(--muted); }
+  .guard h3 { font-size: 21px; line-height: 1.4; margin: 18px 0 8px; font-weight: 700; }
+  .guard p { margin: 0; color: var(--muted); font-size: 16px; }
+  .guard p strong { color: var(--ink); font-weight: 600; }
+  .guard .tag { display: inline-flex; align-items: center; gap: 8px; margin-top: 18px; font: 500 13px/1.2 var(--sans); color: var(--muted); background: var(--panel-2); border: 1px solid var(--rule); border-radius: 999px; padding: 6px 11px; }
+  .guard .tag i { width: 7px; height: 7px; border-radius: 50%; background: var(--accent, var(--green)); }
+  .guard.new { --accent: var(--led-ok); }
+  .guard .new-mark { position: absolute; top: 22px; right: 22px; font: 600 11px/1 var(--mono); letter-spacing: .1em; color: #06231A; background: var(--led-ok); padding: 6px 9px; border-radius: 999px; }
+  .g-boot { --accent: #4C8DF6; --accent-ink: #3E7FE8; }
+  .g-down { --accent: var(--led-warn); --accent-ink: var(--amber); }
+  .g-stuck { --accent: #B07CF0; --accent-ink: #9563D8; }
+  :root[data-theme="dark"] .g-boot { --accent-ink: #7FA8F0; }
+  :root[data-theme="dark"] .g-stuck { --accent-ink: #C29BF5; }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) .g-boot { --accent-ink: #7FA8F0; }
+    :root:not([data-theme="light"]) .g-stuck { --accent-ink: #C29BF5; }
+  }
+
+  /* ---------- 트레이 아이콘 ---------- */
+  .tray-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.05fr); gap: 56px; align-items: start; }
+  .why { margin: 26px 0 0; padding: 0; list-style: none; display: grid; gap: 14px; }
+  .why li { display: grid; grid-template-columns: 28px 1fr; gap: 12px; color: var(--muted); font-size: 16px; }
+  .why li strong { color: var(--ink); font-weight: 600; }
+  .why .n { width: 28px; height: 28px; border-radius: 50%; display: grid; place-items: center; font: 600 13px/1 var(--mono); background: var(--panel); border: 1px solid var(--rule-2); color: var(--ink); }
+  .states { display: grid; gap: 12px; }
+  .state {
+    display: grid; grid-template-columns: 56px minmax(0, 1fr); gap: 16px; align-items: center;
+    background: var(--panel); border: 1px solid var(--rule); border-radius: 16px; padding: 14px 18px; box-shadow: var(--shadow);
+  }
+  .state .ico { width: 52px; height: 52px; color: var(--c); filter: drop-shadow(0 6px 14px color-mix(in srgb, var(--c) 40%, transparent)); }
+  .state h3 { margin: 0; font-size: 17px; font-weight: 700; display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; }
+  .state h3 span { font-weight: 500; font-size: 14px; color: var(--muted); }
+  .state p { margin: 2px 0 0; font: 400 14px/1.6 var(--sans); color: var(--muted); }
+  .state.bad { border-color: color-mix(in srgb, var(--led-bad) 45%, var(--rule)); }
+  .menu-demo { display: flex; flex-wrap: wrap; gap: 14px; align-items: flex-start; margin-top: 18px; }
+  .winmenu {
+    background: #2B2B2B; color: #F2F2F2; border-radius: 8px; padding: 4px; min-width: 260px; font-size: 13px;
+    box-shadow: 0 16px 34px -12px rgba(0, 0, 0, .55); border: 1px solid #3A3A3A;
+  }
+  .winmenu div { padding: 7px 12px; border-radius: 4px; }
+  .winmenu .off { color: #8E8E8E; }
+  .winmenu .hl { background: #3A3A3A; }
+  .winmenu hr { border: 0; border-top: 1px solid #3F3F3F; margin: 4px 6px; }
+  .menu-cap { flex: 1; min-width: 200px; font-size: 14.5px; color: var(--muted); margin: 0; }
+  .callout { margin-top: 22px; display: grid; grid-template-columns: auto 1fr; gap: 12px; padding: 14px 16px; border-radius: 14px; background: var(--panel); border: 1px dashed var(--rule-2); font-size: 15px; color: var(--muted); }
+  .callout strong { color: var(--ink); }
+  .callout .k { font: 600 12px/1 var(--mono); padding: 6px 8px; border-radius: 6px; background: var(--ink); color: var(--bg); height: fit-content; }
+
+  /* ---------- 관리 창 ---------- */
+  .mgr { display: grid; grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr); gap: 64px; align-items: center; }
+  .shot { position: relative; justify-self: center; width: min(100%, 420px); }
+  .shot::before { content: ""; position: absolute; inset: 10% -8% -6% -8%; background: radial-gradient(closest-side, color-mix(in srgb, var(--led-ok) 30%, transparent), transparent); filter: blur(10px); z-index: 0; }
+  .shot img { position: relative; z-index: 1; width: 100%; height: auto; display: block; border-radius: 14px; border: 1px solid var(--rule-2); box-shadow: 0 40px 70px -36px rgba(0, 0, 0, .65); }
+  .feat { list-style: none; margin: 30px 0 0; padding: 0; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 22px 28px; }
+  .feat li { font-size: 15.5px; color: var(--muted); padding-top: 14px; border-top: 1px solid var(--rule); }
+  .feat li strong { display: block; color: var(--ink); font-size: 16.5px; margin-bottom: 3px; }
+
+  /* ---------- 설치 ---------- */
+  .install { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr); gap: 18px; }
+  .card { background: var(--panel); border: 1px solid var(--rule); border-radius: 20px; padding: 26px; box-shadow: var(--shadow); min-width: 0; }
+  .card h3 { margin: 0 0 6px; font-size: 19px; font-weight: 700; display: flex; align-items: center; gap: 10px; }
+  .card h3 .rec { font: 700 12px/1 var(--sans); color: #06231A; background: var(--led-ok); padding: 5px 8px; border-radius: 999px; }
+  .card p { margin: 0 0 14px; color: var(--muted); font-size: 15.5px; }
+  .card .cmd { border-color: transparent; }
+  .card .cmd .copy { border-left-color: #1E2B34; }
+  .card .hint { font-size: 14px; color: var(--muted); margin: 12px 0 0; }
+  .card.feature { grid-row: span 2; display: flex; flex-direction: column; background: linear-gradient(180deg, color-mix(in srgb, var(--led-ok) 7%, var(--panel)), var(--panel)); border-color: color-mix(in srgb, var(--led-ok) 35%, var(--rule)); }
+  .steps { list-style: none; counter-reset: s; margin: 22px 0 0; padding: 0; display: grid; gap: 12px; }
+  .steps li { counter-increment: s; display: grid; grid-template-columns: 26px 1fr; gap: 12px; font-size: 15px; color: var(--muted); }
+  .steps li::before { content: counter(s); width: 26px; height: 26px; border-radius: 50%; display: grid; place-items: center; font: 600 12.5px/1 var(--mono); background: var(--panel-2); border: 1px solid var(--rule-2); color: var(--ink); }
+  .btn {
+    display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-height: 42px; padding: 0 18px; border-radius: 11px;
+    font: 600 15px/1 var(--sans); text-decoration: none; background: var(--ink); color: var(--bg); border: 1px solid var(--ink);
+  }
+  .btn:hover { opacity: .9; }
+  .notes { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 18px; margin-top: 18px; }
+  .note { border-top: 2px solid var(--rule-2); padding-top: 14px; font-size: 15px; color: var(--muted); }
+  .note strong { display: block; color: var(--ink); font-size: 16px; margin-bottom: 4px; }
+  .note code { color: var(--ink); }
+
+  /* ---------- 비교 ---------- */
+  .table-scroll { overflow-x: auto; background: var(--panel); border: 1px solid var(--rule); border-radius: 20px; box-shadow: var(--shadow); }
+  .compare { width: 100%; border-collapse: collapse; font-size: 15.5px; min-width: 620px; }
+  .compare th, .compare td { text-align: left; vertical-align: top; padding: 18px 22px; border-bottom: 1px solid var(--rule); }
+  .compare tr:last-child th, .compare tr:last-child td { border-bottom: 0; }
+  .compare thead th { font: 600 13.5px/1 var(--sans); letter-spacing: .02em; color: var(--muted); padding-block: 16px; }
+  .compare tbody th { font-weight: 600; white-space: nowrap; }
   .compare th code { overflow-wrap: normal; word-break: normal; }
   .compare thead th, .compare .yes, .compare .no { white-space: nowrap; }
-  .yes { color: var(--green); font-weight: 700; }
-  .no { color: var(--muted); font-weight: 700; }
-  .table-scroll { overflow-x: auto; }
+  .compare td { color: var(--muted); }
+  .compare tr.mine th, .compare tr.mine td { background: color-mix(in srgb, var(--led-ok) 9%, transparent); color: var(--ink); }
+  .yes { color: var(--green) !important; font-weight: 700; }
+  .no { font-weight: 700; }
+  .t-hint { font-size: 14.5px; color: var(--muted); margin: 16px 0 0; }
 
-  .manager { display: grid; grid-template-columns: minmax(0, 300px) 1fr; gap: 28px; align-items: start; }
-  .manager img { width: 100%; height: auto; border-radius: 12px; border: 1px solid var(--rule); box-shadow: 0 18px 40px -26px rgba(20, 32, 43, .55); }
-  .manager ul { margin: 0; padding-left: 18px; display: grid; gap: 8px; }
-  .manager li { color: var(--muted); font-size: 15.5px; }
-  .manager li strong { color: var(--ink); font-weight: 500; }
-  .facts { margin: 0; display: grid; gap: 18px; }
-  .facts div { display: grid; grid-template-columns: 200px 1fr; gap: 16px; padding-bottom: 18px; border-bottom: 1px solid var(--rule); }
-  .facts dt { font-family: "IBM Plex Mono", monospace; font-size: 14px; font-weight: 500; }
+  /* ---------- 설치되는 것 ---------- */
+  .facts { margin: 0; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 40px; }
+  .facts div { padding: 20px 0; border-top: 1px solid var(--rule); }
+  .facts dt { font: 700 16px/1.4 var(--sans); margin-bottom: 6px; display: flex; align-items: center; gap: 8px; }
+  .facts dt::before { content: ""; width: 7px; height: 7px; border-radius: 2px; background: var(--green); }
   .facts dd { margin: 0; color: var(--muted); font-size: 15.5px; }
 
-  footer { border-top: 1px solid var(--rule); padding: 32px 0 48px; font-size: 14px; color: var(--muted); }
-  footer .wrap { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 12px; }
+  /* ---------- 제거 ---------- */
+  .remove { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr); gap: 18px; }
 
-  @media (max-width: 640px) {
-    .manager { grid-template-columns: 1fr; }
-    .manager img { max-width: 320px; }
+  footer { background: var(--st-bg); color: var(--st-muted); padding: 44px 0 56px; font-size: 14px; }
+  footer .wrap { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 14px 24px; }
+  footer .brand { color: var(--st-ink); }
+  footer a { color: var(--st-ink); }
+
+  /* ================= 화면 크기 ================= */
+  @media (max-width: 1020px) {
+    .nav { display: none; }
+    .top-actions { margin-left: auto; }
+    .hero { grid-template-columns: minmax(0, 1fr); gap: 44px; padding-block: 36px 64px; }
+    .stage::after { right: -360px; top: 160px; }
+    .tray-grid, .mgr { grid-template-columns: minmax(0, 1fr); gap: 40px; }
+    .install, .remove { grid-template-columns: minmax(0, 1fr); }
+    .card.feature { grid-row: auto; }
   }
-  @media (max-width: 860px) {
-    .hero { grid-template-columns: 1fr; gap: 40px; padding-block: 48px 64px; }
-    .block-grid { grid-template-columns: 1fr; gap: 20px; }
-    .facts div { grid-template-columns: 1fr; gap: 4px; }
-  }
-  @media (max-width: 480px) {
+  @media (max-width: 720px) {
     .wrap { padding: 0 16px; }
-    body { font-size: 16px; }
-    .device { padding: 14px; }
-    .screen { font-size: 12.5px; height: 232px; }
-    .compare tbody th { white-space: normal; }
+    section.block { padding: 68px 0; }
+    .guards, .feat, .facts, .notes { grid-template-columns: 1fr; }
+    .sim { padding: 12px; border-radius: 18px; }
+    .sim-controls { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .desktop { height: 290px; }
+    .tb-search { display: none; }
+    .head-row { margin-bottom: 32px; }
+    .guard { padding: 24px 20px 20px; }
+    .guard::before { left: 20px; right: 20px; }
   }
+  @media (max-width: 420px) {
+    body { font-size: 16px; }
+    .lede { font-size: 16.5px; }
+    .log { font-size: 11.6px; padding: 8px 10px; }
+    .logwin { left: 8px; right: 8px; top: 8px; bottom: 8px; }
+    .gh span { display: none; }
+    .gh { padding: 0 10px; }
+    .cmd pre { font-size: 12.5px; }
+    .tip { right: 8px; }
+  }
+  /* 공유 이미지(cover.png, 1200x630)용: ?cover */
+  .cover-only { display: none; }
+  :root[data-cover] .cover-only { display: block; }
+  :root[data-cover] .lede, :root[data-cover] .quick-label, :root[data-cover] .quick-foot, :root[data-cover] .hero-links,
+  :root[data-cover] .badges, :root[data-cover] .sim-foot, :root[data-cover] .sim-controls, :root[data-cover] .nav { display: none; }
+  :root[data-cover] .top-actions { margin-left: auto; }
+  :root[data-cover] .hero { padding-block: 34px 0; align-items: start; }
+  :root[data-cover] .cover-line { font-size: 19px; color: var(--st-muted); margin: 0 0 30px; }
+  :root[data-cover] .desktop { height: 318px; }
+  :root[data-cover] .stage { min-height: 100vh; border-bottom: 0; }
+  :root[data-cover] .toast { top: 52px; bottom: auto; }
+
   @media (prefers-reduced-motion: reduce) {
+    html { scroll-behavior: auto; }
     *, *::before, *::after { animation: none !important; transition: none !important; }
   }
 </style>
 </head>
 <body>
 
-<header class="top">
-  <div class="wrap">
-    <a class="brand" href="./"><span class="brand-dot" aria-hidden="true"></span>tailscale-force-connect</a>
-    <a class="top-link" href="https://github.com/jeiel85/tailscale-force-connect">GitHub</a>
-  </div>
-</header>
+<!-- 앱 아이콘과 같은 모양(트레이 아이콘). 가운데 원의 색은 currentColor -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false">
+  <symbol id="tfc" viewBox="0 0 32 32">
+    <rect width="32" height="32" rx="7" fill="#14202A"/>
+    <circle cx="16" cy="16" r="11" fill="currentColor" opacity=".3"/>
+    <circle cx="16" cy="16" r="12.4" fill="none" stroke="#CFE3D8" stroke-width="2.7"/>
+    <circle cx="16" cy="16" r="8.6" fill="currentColor"/>
+  </symbol>
+  <symbol id="gh" viewBox="0 0 16 16"><path fill="currentColor" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></symbol>
+</svg>
 
-<main>
-  <div class="wrap hero">
-    <div>
-      <h1>꺼 둔 채로 재부팅해도,<br><span class="again">다시 연결됩니다.</span></h1>
-      <p class="lede">Windows에서 Tailscale을 <strong>Disconnect</strong> 해 둔 채로 재부팅하면, 끊긴 상태 그대로 켜집니다.
-        이 도구는 부팅할 때마다 SYSTEM 권한으로 다시 연결합니다. 로그인하지 않아도 됩니다. 평소에 직접 끊을 수도 있지만, <strong>1시간</strong>이 지나면 자동으로 다시 연결됩니다.</p>
-      <div class="hero-actions">
-        <a class="btn" href="#install">설치 방법</a>
-        <a class="btn ghost" href="https://github.com/jeiel85/tailscale-force-connect">소스 보기</a>
+<div class="stage">
+  <header class="top">
+    <div class="wrap">
+      <a class="brand" href="./"><svg class="ico"><use href="#tfc"/></svg>tailscale-force-connect</a>
+      <nav class="nav" aria-label="이 페이지">
+        <a href="#what">하는 일</a>
+        <a href="#tray">트레이 아이콘</a>
+        <a href="#manager">관리 창</a>
+        <a href="#install">설치</a>
+        <a href="#compare">비교</a>
+        <a href="#remove">제거</a>
+      </nav>
+      <div class="top-actions">
+        <a class="gh" href="https://github.com/jeiel85/tailscale-force-connect"><svg class="ico" width="16" height="16"><use href="#gh"/></svg><span>GitHub</span></a>
+        <button type="button" class="theme-btn" id="theme-btn" aria-label="밝은 테마와 어두운 테마 바꾸기">
+          <svg class="sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="4.2"/><path d="M12 2.5v2.2M12 19.3v2.2M4.6 4.6l1.6 1.6M17.8 17.8l1.6 1.6M2.5 12h2.2M19.3 12h2.2M4.6 19.4l1.6-1.6M17.8 6.2l1.6-1.6"/></svg>
+          <svg class="moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20.5 14.2A8.5 8.5 0 019.8 3.5a8.5 8.5 0 1010.7 10.7z"/></svg>
+        </button>
       </div>
     </div>
+  </header>
 
-    <div class="device" aria-labelledby="demo-title">
-      <div class="device-head">
-        <span class="device-name" id="demo-title">직접 해 보기 · 이 PC</span>
-        <span class="status"><span class="led" id="led" data-state="running" aria-hidden="true"></span><span id="status-text">연결됨</span></span>
-      </div>
-      <div class="screen" id="screen">
-        <ol id="log" aria-live="polite" aria-label="부팅 로그"></ol>
-      </div>
-      <div class="controls">
-        <button type="button" class="ctl" id="btn-toggle">연결 끊기</button>
-        <button type="button" class="ctl reboot" id="btn-reboot">재부팅</button>
-      </div>
-      <label class="install-toggle"><input type="checkbox" id="chk-installed" checked> tailscale-force-connect 설치됨</label>
-      <p class="device-note">실제 <span class="mono">connect.log</span> 형식을 그대로 흉내 낸 시뮬레이션입니다. 20초 대기는 줄여서 보여 줍니다.</p>
-    </div>
-  </div>
-
-  <section class="block" id="manager" aria-labelledby="h-manager">
-    <div class="wrap block-grid">
+  <main id="top">
+    <div class="wrap hero">
       <div>
-        <h2 id="h-manager">관리 창</h2>
-        <p class="side-note">설치하면 시작 메뉴에 <strong>Tailscale Force Connect</strong>가 생깁니다. 트레이에 상주하지 않고, 열었을 때만 동작합니다.</p>
-      </div>
-      <div class="manager">
-        <img src="manager.png" width="542" height="772" alt="관리 창: 연결됨 상태, 부팅할 때 자동으로 연결, 직접 끊으면 1시간 뒤 재연결, 멈추면 3분 뒤 재시작, 자동 재연결 시간 선택과 적용 버튼, 동작 확인과 Tailscale 다시 시작 버튼, 최근 기록">
-        <ul>
-          <li><strong>지금 상태</strong>: 연결 여부, Tailscale 기기 이름과 IP. 끊겨 있으면 몇 분 뒤 다시 연결되는지 보여 줍니다.</li>
-          <li><strong>설정</strong>: 직접 끊은 뒤 다시 연결할 시간을 고르고 적용합니다. 이때만 UAC 창이 뜹니다.</li>
-          <li><strong>최근 기록</strong>: 부팅 때마다, 자동 재연결·멈춤 복구 때마다 남는 기록을 봅니다. 최근 40줄을 칸 안에서 스크롤해 보고, 실패·멈춤 기록은 주황색으로 표시합니다.</li>
-          <li><strong>제거</strong>: 버튼을 두 번 누르면 모두 지웁니다.</li>
-          <li><strong>Windows 알림</strong>: 1분마다 연결 상태를 확인해, 끊기면 "약 1시간 뒤 다시 연결합니다", 돌아오면 "다시 연결됐습니다"라고 알립니다. 새 버전이 나와도 알려 줍니다. 알림을 누르면 관리 창이 열립니다. 관리 창의 <strong>Windows 알림</strong> 선택으로 사용자마다 끌 수 있습니다.</li>
-          <li><strong>업데이트</strong>: 열 때와 로그인 직후 새 버전을 확인하고, 있으면 알림 창을 띄워 60초 뒤 자동으로(관리자 권한 승인 한 번) 설정을 유지한 채 연결을 끊지 않고 업데이트합니다. [나중에]로 멈출 수 있고, 버전 표시를 누르면 직접 확인할 수도 있습니다. 받은 파일은 GitHub에 기록된 SHA-256으로 검증하고, 설치된 것보다 낮은 버전으로는 내려가지 않으며, 도중에 실패하면 이전 버전으로 되돌립니다.</li>
-          <li>Rust와 Slint로 만든 약 8MB짜리 실행 파일입니다. GPU 없이 그려서 원격 데스크톱에서도 열립니다.</li>
+        <a class="pill" href="#tray"><b>NEW</b>v1.10 · 작업 표시줄 아이콘으로 늘 상태를 봅니다</a>
+        <h1>꺼 둔 채로 재부팅해도,<br><em>다시 연결됩니다.</em></h1>
+        <p class="cover-only cover-line">Windows용 Tailscale 자동 재연결 · 멈춤 복구 · 상태 아이콘</p>
+        <p class="lede">Tailscale은 마지막 상태를 기억해서, <strong>Disconnect</strong> 한 채로 재부팅하면 끊긴 채로 켜집니다.
+          원격으로 들어가야 하는 PC라면 그 앞까지 가야 하죠. 이 도구는 부팅할 때마다 <strong>SYSTEM 권한으로 다시 연결</strong>합니다. Windows에 로그인하지 않아도 됩니다.</p>
+
+        <div class="quick">
+          <div class="quick-label"><span>한 줄로 설치</span><span>cmd나 PowerShell에 붙여 넣기</span></div>
+          <div class="cmd"><pre><code>powershell -c "irm https://jeiel85.github.io/tailscale-force-connect/get.ps1 | iex"</code></pre><button type="button" class="copy">복사</button></div>
+          <p class="quick-foot">UAC 창이 한 번 뜹니다. 받은 파일은 GitHub에 기록된 SHA-256과 비교한 뒤 설치합니다. <a href="get.ps1">get.ps1 보기</a></p>
+        </div>
+        <div class="hero-links">
+          <a href="#install">다른 설치 방법 →</a>
+          <a href="https://github.com/jeiel85/tailscale-force-connect/releases/latest">최신 릴리스</a>
+        </div>
+        <ul class="badges" aria-label="요약">
+          <li>Windows 10 · 11</li>
+          <li>로그인 전에도 동작</li>
+          <li>무료 · MIT</li>
+          <li>관리 창 약 8MB</li>
         </ul>
       </div>
-    </div>
-  </section>
 
-  <section class="block" id="install" aria-labelledby="h-install">
-    <div class="wrap block-grid">
-      <div>
-        <h2 id="h-install">설치</h2>
-        <p class="side-note">Windows 10/11, Tailscale에 로그인된 상태, 관리자 권한이 필요합니다. 어느 방법이든 UAC 창이 한 번 뜹니다.</p>
+      <div class="sim" aria-labelledby="sim-title">
+        <div class="sim-head">
+          <span class="sim-title" id="sim-title">직접 해 보기 · 이 PC</span>
+          <span class="sim-state"><span class="led" id="sim-led" aria-hidden="true"></span><span id="sim-state">연결됨</span></span>
+        </div>
+        <div class="monitor">
+          <div class="desktop" id="desktop">
+            <div class="logwin">
+              <div class="logwin-head" aria-hidden="true"><i></i><i></i><i></i><span>connect.log</span></div>
+              <ol class="log" id="log" aria-live="polite" aria-label="실행 기록"></ol>
+            </div>
+            <div class="toast" id="toast" role="status" aria-live="polite">
+              <svg class="ico"><use href="#tfc"/></svg>
+              <div><small>Tailscale Force Connect</small><b id="toast-title"></b><span id="toast-body"></span></div>
+            </div>
+            <div class="tip" id="tip" role="tooltip"></div>
+            <div class="poweroff" id="poweroff"><span id="poweroff-text">전원 꺼짐</span></div>
+          </div>
+          <div class="taskbar">
+            <span class="start" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
+            <span class="tb-search" aria-hidden="true"></span>
+            <span class="tb-spacer"></span>
+            <span class="tray">
+              <span class="chev" aria-hidden="true">^</span>
+              <button type="button" class="tray-btn" id="tray-btn" aria-label="트레이 아이콘: 지금 상태 보기" aria-expanded="false" aria-describedby="tip"><svg class="ico"><use href="#tfc"/></svg></button>
+              <svg class="glyph" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M2.5 9a14 14 0 0119 0M5.8 12.4a9.5 9.5 0 0112.4 0M9.1 15.8a4.8 4.8 0 015.8 0"/><circle cx="12" cy="19" r="1" fill="currentColor"/></svg>
+              <span class="clock" id="clock" aria-hidden="true">오후 2:46<br>2026-11-18</span>
+            </span>
+          </div>
+        </div>
+        <div class="sim-controls">
+          <button type="button" class="ctl" id="btn-toggle">연결 끊기<small>Disconnect</small></button>
+          <button type="button" class="ctl" id="btn-wait">1시간 뒤로<small>빨리 감기</small></button>
+          <button type="button" class="ctl" id="btn-sleep">절전 후 깨우기<small>멈춤 흉내</small></button>
+          <button type="button" class="ctl primary" id="btn-reboot">재부팅<small>전원 다시 켜기</small></button>
+        </div>
+        <div class="sim-foot">
+          <label class="switch"><input type="checkbox" id="chk-installed" checked> tailscale-force-connect 설치됨</label>
+          <p class="sim-note">실제 기록 문구를 흉내 낸 시뮬레이션 · 시간은 줄여서</p>
+        </div>
       </div>
-      <div class="methods">
-        <div class="method">
-          <h3>한 줄로 설치</h3>
-          <p>cmd나 PowerShell에 붙여 넣으면 최신 릴리스를 받아 설치합니다.</p>
-          <div class="cmd"><pre><code>powershell -c "irm https://jeiel85.github.io/tailscale-force-connect/get.ps1 | iex"</code></pre><button type="button" class="copy">복사</button></div>
-          <p class="hint">인터넷에서 받은 스크립트를 바로 실행하는 방식입니다. 받은 zip은 GitHub에 기록된 SHA-256과 비교하고, 관리자만 쓸 수 있는 폴더로 옮겨 다시 확인한 뒤 실행합니다. <a href="get.ps1">get.ps1 내용 보기</a></p>
+    </div>
+  </main>
+</div>
+
+<section class="block" id="what" aria-labelledby="h-what">
+  <div class="wrap">
+    <div class="head-row">
+      <div>
+        <p class="eyebrow">하는 일</p>
+        <h2 id="h-what">꺼져도, 끊겨도, 멈춰도.<br>그리고 늘 보이게.</h2>
+      </div>
+      <p class="intro">SYSTEM 예약 작업 두 개가 연결을 지키고, 작업 표시줄 아이콘이 그 작업이 정말 돌고 있는지 보여 줍니다. 기존 <code>tailscale up</code> 설정(exit node, 경로 수락 등)은 건드리지 않습니다.</p>
+    </div>
+    <div class="guards">
+      <article class="guard g-boot">
+        <div class="num">20초<small>부팅 뒤</small></div>
+        <h3>꺼 둔 채로 재부팅해도</h3>
+        <p>부팅하고 20초 뒤 SYSTEM 권한으로 <code>tailscale up</code>을 실행해 끊어 둔 상태를 덮어씁니다. 네트워크가 늦게 잡히면 10초 간격으로 최대 10분 동안 다시 시도합니다. <strong>Windows에 로그인하지 않아도</strong> 됩니다.</p>
+        <span class="tag"><i></i>Tailscale Auto Connect · 시작 시</span>
+      </article>
+      <article class="guard g-down">
+        <div class="num">1시간<small>직접 끊은 뒤</small></div>
+        <h3>직접 끊어 둬도</h3>
+        <p>끊는 건 자유입니다. Tailscale 트레이에서 끊었든 <code>tailscale down</code>으로 끊었든, 끊긴 상태가 1시간 넘게 이어지면 다시 연결합니다. 30분·2시간·4시간으로 바꾸거나 끌 수 있고, 끊기고 돌아올 때 Windows 알림으로 알려 줍니다.</p>
+        <span class="tag"><i></i>Tailscale Auto Reconnect · 1분마다</span>
+      </article>
+      <article class="guard g-stuck">
+        <div class="num">3분<small>멈춘 뒤</small></div>
+        <h3>연결된 척 멈춰 있어도</h3>
+        <p>절전에서 깨어난 뒤 Tailscale 트레이는 '연결됨'인데 다른 기기에서는 offline인 상태가 실제로 있습니다. 인터넷이 되는데도 3분 넘게 이어지면 Tailscale 서비스를 다시 시작합니다. <strong>인터넷이 끊긴 거라면 건드리지 않습니다.</strong></p>
+        <span class="tag"><i></i>같은 감시 작업 · 30분에 한 번까지</span>
+      </article>
+      <article class="guard new">
+        <span class="new-mark">NEW</span>
+        <div class="num">15초<small>마다 갱신</small></div>
+        <h3>그리고 늘 보이게</h3>
+        <p>작업 표시줄의 상태 아이콘이 연결 상태와 함께, 위의 감시 작업이 <strong>정말 돌고 있는지</strong>를 색으로 보여 줍니다. 조용히 멈춰 있으면 빨강으로 바뀝니다.</p>
+        <span class="tag"><i></i>트레이 아이콘 · 사용자마다 끌 수 있음</span>
+      </article>
+    </div>
+  </div>
+</section>
+
+<section class="block alt" id="tray" aria-labelledby="h-tray">
+  <div class="wrap tray-grid">
+    <div>
+      <p class="eyebrow">트레이 아이콘 · v1.10</p>
+      <h2 id="h-tray">아이콘 색만<br>보면 됩니다.</h2>
+      <p class="intro">"트레이 아이콘이 없으니 잘 되고 있는지 모르겠다"에서 시작한 기능입니다.</p>
+      <ul class="why">
+        <li><span class="n">1</span><span><strong>감시 작업은 정상일 때 조용합니다.</strong> 로그가 불어나지 않도록 아무것도 남기지 않고, SYSTEM 작업의 실행 기록은 일반 권한으로 볼 수도 없습니다.</span></li>
+        <li><span class="n">2</span><span><strong>그래서 확인할 때마다 시각을 남깁니다.</strong> 감시 작업이 1분마다 <code>watch-last.json</code>에 시각을 덮어쓰고, 트레이가 그 시각을 봅니다.</span></li>
+        <li><span class="n">3</span><span><strong>7분 넘게 소식이 없으면 빨강.</strong> 켜진 직후·설치 직후·절전에서 깨어난 직후에는 기다렸다가 판단합니다. 관리 창의 [적용]으로 다시 등록할 수 있습니다.</span></li>
+      </ul>
+      <div class="callout"><span class="k">^</span><span>Windows 11은 새 아이콘을 작업 표시줄의 <strong>^</strong> 안에 숨깁니다. 한 번 작업 표시줄로 끌어 두면 늘 보입니다. 트레이는 보여 주기만 하므로 꺼도 자동 연결은 그대로입니다.</span></div>
+    </div>
+    <div>
+      <div class="states">
+        <div class="state" style="--c: var(--led-ok)"><svg class="ico" aria-hidden="true"><use href="#tfc"/></svg><div><h3>초록 <span>연결됨 · 감시 정상</span></h3><p>연결됨 · my-pc · 100.101.102.103<br>감시 정상 · 20초 전 확인</p></div></div>
+        <div class="state" style="--c: var(--led-warn)"><svg class="ico" aria-hidden="true"><use href="#tfc"/></svg><div><h3>주황 <span>직접 끊음 · 서버와 연결 안 됨 · 응답 없음</span></h3><p>끊김 · 약 40분 뒤 다시 연결</p></div></div>
+        <div class="state bad" style="--c: var(--led-bad)"><svg class="ico" aria-hidden="true"><use href="#tfc"/></svg><div><h3>빨강 <span>감시 작업 멈춤 · 로그인 필요</span></h3><p>감시 작업이 12분 동안 돌지 않음</p></div></div>
+        <div class="state" style="--c: var(--led-idle)"><svg class="ico" aria-hidden="true"><use href="#tfc"/></svg><div><h3>회색 <span>확인하는 중</span></h3><p>확인하는 중…</p></div></div>
+      </div>
+      <div class="menu-demo">
+        <div class="winmenu" aria-label="트레이 아이콘 오른쪽 클릭 메뉴 예시">
+          <div class="off">연결됨 · my-pc · 100.101.102.103</div>
+          <div class="off">감시 정상 · 20초 전 확인</div>
+          <hr>
+          <div class="hl">관리 창 열기</div>
+          <div>트레이 아이콘 끄기</div>
         </div>
-        <div class="method">
-          <h3>zip 받아서 더블클릭</h3>
-          <p>압축을 풀고 <code>install.cmd</code>를 더블클릭합니다. "Windows의 PC 보호" 창이 뜨면 <strong>추가 정보 → 실행</strong>을 누르세요.</p>
-          <a class="btn" href="https://github.com/jeiel85/tailscale-force-connect/releases/latest/download/tailscale-force-connect.zip">zip 내려받기</a>
-        </div>
-        <div class="method">
-          <h3>git으로 받기</h3>
-          <div class="cmd"><pre><code>git clone https://github.com/jeiel85/tailscale-force-connect.git
+        <p class="menu-cap">오른쪽 클릭 메뉴 위쪽 두 줄이 지금 상태입니다. 왼쪽 클릭은 관리 창을 엽니다. 1분마다 도는 알림 작업이 아이콘이 꺼져 있으면 다시 띄웁니다.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="manager" aria-labelledby="h-manager">
+  <div class="wrap mgr">
+    <div class="shot">
+      <img src="manager.png" width="542" height="772" loading="lazy" alt="관리 창: 연결됨 상태, 부팅할 때 자동으로 연결, 직접 끊으면 1시간 뒤 재연결, 멈추면 3분 뒤 재시작, 감시 작업이 23초 전에 확인함, 트레이 아이콘과 Windows 알림 선택, 자동 재연결 시간 선택과 적용 버튼, 동작 확인과 Tailscale 다시 시작 버튼, 최근 기록">
+    </div>
+    <div>
+      <p class="eyebrow">관리 창</p>
+      <h2 id="h-manager">필요할 때 여는<br>작은 창 하나.</h2>
+      <p class="intro">트레이 아이콘이나 시작 메뉴의 <strong>Tailscale Force Connect</strong>로 엽니다. 여는 것만으로는 관리자 권한이 필요 없고, 설정을 바꾸는 버튼을 누를 때만 UAC 창이 뜹니다.</p>
+      <ul class="feat">
+        <li><strong>지금 상태</strong>연결 여부, 기기 이름과 IP, 감시 작업이 마지막으로 확인한 때. 끊겨 있으면 몇 분 뒤 다시 연결되는지.</li>
+        <li><strong>설정</strong>직접 끊은 뒤 다시 연결할 시간을 고르고 적용. 트레이 아이콘·Windows 알림은 사용자마다 켜고 끕니다.</li>
+        <li><strong>문제 해결</strong>[동작 확인]은 원격 접속 중인 것 같으면 한 번 더 묻고, [Tailscale 다시 시작]은 멈춘 서비스를 바로 되살립니다.</li>
+        <li><strong>최근 기록</strong>부팅·재연결·복구 기록 40줄. 실패와 멈춤은 주황색으로 보입니다.</li>
+        <li><strong>업데이트</strong>새 버전이 있으면 60초 뒤 자동으로(UAC 한 번) 설정을 지킨 채 연결을 끊지 않고 올립니다. 실패하면 이전 버전으로 되돌립니다.</li>
+        <li><strong>원격에서도 그려짐</strong>Rust와 Slint로 만든 약 8MB 실행 파일. GPU 없이 그려서 원격 데스크톱에서도 열립니다.</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="block alt" id="install" aria-labelledby="h-install">
+  <div class="wrap">
+    <div class="head-row">
+      <div>
+        <p class="eyebrow">설치</p>
+        <h2 id="h-install">1분이면 끝납니다.</h2>
+      </div>
+      <p class="intro">Windows 10/11, Tailscale에 로그인된 상태, 관리자 권한이 필요합니다. 어느 방법이든 UAC 창이 한 번 뜹니다.</p>
+    </div>
+    <div class="install">
+      <div class="card feature">
+        <h3>한 줄로 설치 <span class="rec">추천</span></h3>
+        <p>cmd나 PowerShell에 붙여 넣으면 최신 릴리스를 받아 설치하고 관리 창을 엽니다.</p>
+        <div class="cmd"><pre><code>powershell -c "irm https://jeiel85.github.io/tailscale-force-connect/get.ps1 | iex"</code></pre><button type="button" class="copy">복사</button></div>
+        <ol class="steps">
+          <li>GitHub API로 최신 릴리스와 그 zip의 SHA-256을 확인하고 받습니다.</li>
+          <li>관리자만 쓸 수 있는 새 폴더로 옮겨 SHA-256을 다시 확인한 뒤 풉니다. 승인을 기다리는 사이 파일을 바꿔치기해도 실행되지 않습니다.</li>
+          <li>관리 창을 Program Files에 설치하고 예약 작업을 등록한 뒤, 몇 초 끊었다 다시 연결되는지 확인합니다.</li>
+        </ol>
+        <p class="hint">인터넷에서 받은 스크립트를 바로 실행하는 방식입니다. 먼저 읽어 보려면 <a href="get.ps1">get.ps1</a>을 열어 보세요.</p>
+      </div>
+      <div class="card">
+        <h3>zip 받아서 더블클릭</h3>
+        <p>압축을 풀고 <code>install.cmd</code>를 더블클릭합니다. "Windows의 PC 보호" 창이 뜨면 <strong>추가 정보 → 실행</strong>을 누르세요.</p>
+        <a class="btn" href="https://github.com/jeiel85/tailscale-force-connect/releases/latest/download/tailscale-force-connect.zip">zip 내려받기</a>
+      </div>
+      <div class="card">
+        <h3>git으로 받기</h3>
+        <div class="cmd"><pre><code>git clone https://github.com/jeiel85/tailscale-force-connect.git
 cd tailscale-force-connect
 powershell -ExecutionPolicy Bypass -File .\install.ps1</code></pre><button type="button" class="copy">복사</button></div>
-        </div>
-        <div class="method notes">
-          <p>설치가 끝나면 몇 초 동안 일부러 연결을 끊었다가 다시 연결되는지 확인합니다. 출력 끝에 <code>검증 성공</code>이 보이면 설치가 끝난 것입니다. 그 PC에 Tailscale로 원격 접속 중이라면 이 확인을 건너뛰세요(관리 창의 [동작 확인]은 원격 접속 중인 것 같으면 한 번 더 묻습니다). 한 줄 설치는 cmd라면 앞에 <code>set TFC_NOTEST=1 &amp;&amp;</code>를, PowerShell이라면 <code>$env:TFC_NOTEST=1;</code>를 붙이고, zip은 <code>install.cmd -NoTest</code>로 실행합니다.</p>
-          <p><strong>Windows 빠른 시작</strong>이 켜져 있으면 일반 종료 후 전원을 켤 때는 동작하지 않습니다. 재시작과 정전 뒤에는 동작합니다. 설치 스크립트가 빠른 시작을 감지하면 끄는 방법을 알려 줍니다.</p>
-          <p>관리 콘솔에서 그 기기의 <strong>Disable key expiry</strong>도 켜 두세요. 키가 만료되면 다시 로그인해야 해서 자동 연결이 되지 않습니다.</p>
-        </div>
       </div>
     </div>
-  </section>
+    <div class="notes">
+      <div class="note"><strong>원격 접속 중이라면</strong>설치 끝에 몇 초 동안 일부러 끊었다 다시 연결되는지 봅니다. 건너뛰려면 cmd는 앞에 <code>set TFC_NOTEST=1 &amp;&amp;</code>, PowerShell은 <code>$env:TFC_NOTEST=1;</code>를 붙이고, zip은 <code>install.cmd -NoTest</code>로 실행합니다.</div>
+      <div class="note"><strong>Windows 빠른 시작</strong>켜져 있으면 일반 종료 후 전원을 켤 때는 동작하지 않습니다. 재시작과 정전 뒤에는 동작합니다. 설치 스크립트가 감지하면 끄는 방법을 알려 줍니다.</div>
+      <div class="note"><strong>키 만료 끄기</strong>관리 콘솔에서 그 기기의 <strong>Disable key expiry</strong>를 켜 두세요. 키가 만료되면 다시 로그인해야 해서 자동 연결이 되지 않습니다.</div>
+    </div>
+  </div>
+</section>
 
-  <section class="block" aria-labelledby="h-compare">
-    <div class="wrap block-grid">
+<section class="block" id="compare" aria-labelledby="h-compare">
+  <div class="wrap">
+    <div class="head-row">
       <div>
-        <h2 id="h-compare">공식 기능과 비교</h2>
-        <p class="side-note">Tailscale 1.84 이상은 비슷한 시스템 정책을 제공합니다. 관리하는 기기가 많다면 공식 정책을 먼저 검토하세요.</p>
+        <p class="eyebrow">공식 기능과 비교</p>
+        <h2 id="h-compare">공식 정책도 먼저<br>검토해 보세요.</h2>
       </div>
-      <div class="table-scroll">
-        <table class="compare">
-          <thead><tr><th scope="col">방법</th><th scope="col">직접 끊기</th><th scope="col">다시 연결되는 때</th></tr></thead>
-          <tbody>
-            <tr><th scope="row"><code>AlwaysOn.<wbr>Enabled</code></th><td class="no">불가</td><td>끊을 수 없게 막습니다. <code>OverrideWithReason</code>을 켜면 사유를 적고 끊을 수 있습니다.</td></tr>
-            <tr><th scope="row"><code>Reconnect<wbr>After</code></th><td class="yes">가능</td><td>정한 시간(예: <code>30m</code>)이 지나면 다시 연결합니다. 다만 1.104.5에서 <code>tailscale down</code> 뒤에는 재연결되지 않았습니다.</td></tr>
-            <tr class="mine"><th scope="row">이 도구</th><td class="yes">가능</td><td>직접 끊으면 약 1시간(바꿀 수 있음) 뒤 다시 연결하고, 부팅할 때는 기다리지 않고 바로 다시 연결합니다.</td></tr>
-          </tbody>
-        </table>
-        <p class="hint">공식 문서에는 정책이 재부팅 때 어떻게 동작하는지 따로 적혀 있지 않습니다. <a href="https://tailscale.com/docs/features/tailscale-system-policies">Tailscale 시스템 정책 문서</a></p>
-      </div>
+      <p class="intro">Tailscale 1.84 이상은 비슷한 시스템 정책을 제공합니다. 관리하는 기기가 많거나 MDM·GPO를 쓴다면 공식 정책이 더 맞습니다.</p>
     </div>
-  </section>
+    <div class="table-scroll">
+      <table class="compare">
+        <thead><tr><th scope="col">방법</th><th scope="col">직접 끊기</th><th scope="col">다시 연결되는 때</th></tr></thead>
+        <tbody>
+          <tr><th scope="row"><code>AlwaysOn.<wbr>Enabled</code></th><td class="no">불가</td><td>끊을 수 없게 막습니다. <code>OverrideWithReason</code>을 켜면 사유를 적고 끊을 수 있습니다.</td></tr>
+          <tr><th scope="row"><code>Reconnect<wbr>After</code></th><td class="yes">가능</td><td>정한 시간(예: <code>30m</code>)이 지나면 다시 연결합니다. 다만 1.104.5에서 <code>tailscale down</code> 뒤에는 재연결되지 않았습니다.</td></tr>
+          <tr class="mine"><th scope="row">이 도구</th><td class="yes">가능</td><td>직접 끊으면 약 1시간(바꿀 수 있음) 뒤 다시 연결하고, 부팅할 때는 기다리지 않고 바로 다시 연결합니다. 연결된 척 멈춘 상태도 되살립니다.</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="t-hint">공식 문서에는 정책이 재부팅 때 어떻게 동작하는지 따로 적혀 있지 않습니다. <a href="https://tailscale.com/docs/features/tailscale-system-policies">Tailscale 시스템 정책 문서</a></p>
+  </div>
+</section>
 
-  <section class="block" aria-labelledby="h-what">
-    <div class="wrap block-grid">
+<section class="block alt" aria-labelledby="h-facts">
+  <div class="wrap">
+    <div class="head-row">
       <div>
-        <h2 id="h-what">설치되는 것</h2>
-        <p class="side-note">모두 <a href="#remove">한 줄로 제거</a>할 수 있습니다.</p>
+        <p class="eyebrow">설치되는 것</p>
+        <h2 id="h-facts">숨기는 것 없이.</h2>
       </div>
-      <dl class="facts">
-        <div><dt>관리 창</dt><dd><code>C:\Program Files\Tailscale Force Connect\</code>에 관리 창과 스크립트 원본을 두고 시작 메뉴 바로가기를 만듭니다. 이 폴더는 관리자만 쓸 수 있습니다.</dd></div>
-        <div><dt>예약 작업</dt><dd><code>Tailscale Auto Connect</code>: 부팅하고 20초 뒤 SYSTEM으로 실행합니다. 연결될 때까지 10초 간격으로 최대 10분 동안 <code>tailscale up</code>을 시도합니다.</dd></div>
-        <div><dt>스크립트 폴더</dt><dd><code>C:\ProgramData\TailscaleAutoConnect\</code>: 관리자만 고칠 수 있고, 일반 사용자는 읽기만 할 수 있습니다.</dd></div>
-        <div><dt>로그</dt><dd>같은 폴더의 <code>connect.log</code>와 이벤트 뷰어의 응용 프로그램 로그(원본 <code>TailscaleForceConnect</code>)에 부팅할 때마다 결과가 남습니다. 연결 실패나 로그인이 필요한 상황(키 만료)은 오류로 기록됩니다.</dd></div>
-        <div><dt>감시 작업</dt><dd><code>Tailscale Auto Reconnect</code>: SYSTEM으로 1분마다 상태를 확인합니다(멈춤 감시를 끄고 재연결 시간을 10분 이상으로 두면 5분마다). 직접 끊은 상태가 1시간 넘게 이어지면 다시 연결합니다. 트레이 메뉴로 끊었든 명령으로 끊었든 똑같습니다. 시간은 <code>install.cmd -ReconnectAfter 30m</code>이나 한 줄 설치 앞의 <code>set TFC_RECONNECT_AFTER=30m &amp;&amp;</code>로 바꾸고, <code>0</code>이면 끕니다.</dd></div>
-        <div><dt>멈춤 감시</dt><dd>같은 작업이, 트레이는 '연결됨'인데 실제로는 서버와 연결되지 않은 상태(절전에서 깨어난 뒤 등)가 인터넷이 되는데도 3분 넘게 이어지면 Tailscale 서비스를 다시 시작하고 Windows 알림으로 알립니다. 풀리지 않으면 30분 뒤 다시 시도합니다. 시간은 <code>install.cmd -HealAfter 10m</code>이나 <code>set TFC_HEAL_AFTER=10m &amp;&amp;</code>로 바꾸고, <code>0</code>이면 끕니다.</dd></div>
-        <div><dt>Unattended 모드</dt><dd>꺼져 있으면 켭니다. 그래야 Windows에 로그인하기 전에도 연결됩니다.</dd></div>
-        <div><dt>기존 설정</dt><dd>플래그 없이 <code>tailscale up</code>만 실행하므로 exit node, 경로 수락 같은 설정은 바뀌지 않습니다.</dd></div>
-      </dl>
+      <p class="intro">모두 <a href="#remove">한 줄로 제거</a>할 수 있습니다. SYSTEM이 실행하는 스크립트는 관리자만 고칠 수 있는 폴더에 둡니다.</p>
     </div>
-  </section>
+    <dl class="facts">
+      <div><dt>부팅 작업</dt><dd><code>Tailscale Auto Connect</code>: 부팅하고 20초 뒤 SYSTEM으로 실행합니다. 연결될 때까지 10초 간격으로 최대 10분 동안 <code>tailscale up</code>을 시도합니다.</dd></div>
+      <div><dt>감시 작업</dt><dd><code>Tailscale Auto Reconnect</code>: SYSTEM으로 1분마다(멈춤 감시를 끄고 재연결 시간을 10분 이상으로 두면 5분마다) 확인합니다. 시간은 <code>install.cmd -ReconnectAfter 30m</code>, <code>-HealAfter 10m</code>로 바꾸고, <code>0</code>이면 끕니다.</dd></div>
+      <div><dt>알림·트레이 작업</dt><dd><code>Tailscale Force Connect Status Alert</code>: 로그인한 사용자 권한으로 1분마다 끊김·재연결·복구를 Windows 알림으로 알리고, 트레이 아이콘이 꺼져 있으면 다시 띄웁니다. 새 버전 확인 작업도 함께 등록합니다.</dd></div>
+      <div><dt>관리 창</dt><dd><code>C:\Program Files\Tailscale Force Connect\</code>에 관리 창과 스크립트 원본을 두고 시작 메뉴 바로가기를 만듭니다. 이 폴더는 관리자만 쓸 수 있습니다.</dd></div>
+      <div><dt>스크립트 폴더</dt><dd><code>C:\ProgramData\TailscaleAutoConnect\</code>: 관리자만 고칠 수 있고 일반 사용자는 읽기만 합니다. <code>connect.log</code>와 이벤트 뷰어(원본 <code>TailscaleForceConnect</code>)에 결과가 남습니다.</dd></div>
+      <div><dt>Unattended 모드</dt><dd>꺼져 있으면 켭니다. 그래야 Windows에 로그인하기 전에도 연결됩니다. 플래그 없이 <code>tailscale up</code>만 실행하므로 다른 설정은 바뀌지 않습니다.</dd></div>
+    </dl>
+  </div>
+</section>
 
-  <section class="block" id="remove" aria-labelledby="h-remove">
-    <div class="wrap block-grid">
+<section class="block" id="remove" aria-labelledby="h-remove">
+  <div class="wrap">
+    <div class="head-row">
       <div>
-        <h2 id="h-remove">제거</h2>
-        <p class="side-note">예약 작업, 설치 폴더, 이벤트 로그 원본, 이 도구가 설정한 자동 재연결 정책을 지웁니다. 그 밖의 Tailscale 설정은 그대로 남습니다.</p>
+        <p class="eyebrow">제거</p>
+        <h2 id="h-remove">지울 때도 한 줄.</h2>
       </div>
-      <div class="methods">
-        <div class="method">
-          <h3>한 줄로 제거</h3>
-          <p>어느 방법으로 설치했든 cmd나 PowerShell에 붙여 넣으면 됩니다. UAC 창이 한 번 뜹니다.</p>
-          <div class="cmd"><pre><code>powershell -c "irm https://jeiel85.github.io/tailscale-force-connect/remove.ps1 | iex"</code></pre><button type="button" class="copy">복사</button></div>
-          <p class="hint">설치할 때 복사해 둔 제거 스크립트를 실행합니다. <a href="remove.ps1">remove.ps1 내용 보기</a></p>
-        </div>
-        <div class="method">
-          <h3>받은 폴더에서 제거</h3>
-          <p>zip이나 git으로 받은 폴더에서 <code>uninstall.cmd</code>를 더블클릭합니다.</p>
-        </div>
+      <p class="intro">예약 작업, 설치 폴더, 관리 창과 트레이 아이콘, 이벤트 로그 원본, 사용자별 알림 기록을 지웁니다. 그 밖의 Tailscale 설정은 그대로 남습니다.</p>
+    </div>
+    <div class="remove">
+      <div class="card">
+        <h3>한 줄로 제거</h3>
+        <p>어느 방법으로 설치했든 cmd나 PowerShell에 붙여 넣으면 됩니다. UAC 창이 한 번 뜹니다.</p>
+        <div class="cmd"><pre><code>powershell -c "irm https://jeiel85.github.io/tailscale-force-connect/remove.ps1 | iex"</code></pre><button type="button" class="copy">복사</button></div>
+        <p class="hint">설치할 때 복사해 둔 제거 스크립트를 실행합니다. <a href="remove.ps1">remove.ps1 보기</a></p>
+      </div>
+      <div class="card">
+        <h3>관리 창이나 받은 폴더에서</h3>
+        <p>관리 창의 [제거]를 두 번 누르거나, zip이나 git으로 받은 폴더에서 <code>uninstall.cmd</code>를 더블클릭합니다.</p>
       </div>
     </div>
-  </section>
-</main>
+  </div>
+</section>
 
 <footer>
   <div class="wrap">
+    <a class="brand" href="#top"><svg class="ico"><use href="#tfc"/></svg>tailscale-force-connect</a>
     <span>Tailscale Inc.와 관계없는 비공식 도구입니다. MIT 라이선스. 관리 창은 <a href="https://slint.dev">Made with Slint</a>.</span>
     <a href="https://github.com/jeiel85/tailscale-force-connect">github.com/jeiel85/tailscale-force-connect</a>
   </div>
@@ -368,105 +802,253 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1</code></pre><button type=
 
 <script>
 (function () {
+  // ---------- 테마 ----------
+  var root = document.documentElement;
+  document.getElementById('theme-btn').addEventListener('click', function () {
+    var dark = root.getAttribute('data-theme') ? root.getAttribute('data-theme') === 'dark'
+      : (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches);
+    var next = dark ? 'light' : 'dark';
+    root.setAttribute('data-theme', next);
+    try { localStorage.setItem('tfc-theme', next); } catch (e) { }
+  });
+
+  // ---------- 명령 복사 ----------
+  Array.prototype.forEach.call(document.querySelectorAll('.copy'), function (b) {
+    b.addEventListener('click', function () {
+      var text = b.parentNode.querySelector('code').textContent;
+      function done(msg, ok) {
+        b.textContent = msg; b.classList.toggle('done', !!ok);
+        setTimeout(function () { b.textContent = '복사'; b.classList.remove('done'); }, 1600);
+      }
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(function () { done('복사됨', true); }, function () { done('직접 복사'); });
+      } else { done('직접 복사'); }
+    });
+  });
+
+  // ---------- 시뮬레이터 ----------
   var reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-  var led = document.getElementById('led');
-  var statusText = document.getElementById('status-text');
-  var screen = document.getElementById('screen');
-  var log = document.getElementById('log');
-  var btnToggle = document.getElementById('btn-toggle');
-  var btnReboot = document.getElementById('btn-reboot');
-  var chk = document.getElementById('chk-installed');
+  var $ = function (id) { return document.getElementById(id); };
+  var log = $('log'), led = $('sim-led'), stateText = $('sim-state'), desktop = $('desktop');
+  var trayBtn = $('tray-btn'), tip = $('tip'), toast = $('toast'), clockEl = $('clock');
+  var poweroff = $('poweroff'), poweroffText = $('poweroff-text');
+  var btnToggle = $('btn-toggle'), btnWait = $('btn-wait'), btnSleep = $('btn-sleep'), btnReboot = $('btn-reboot'), chk = $('chk-installed');
 
-  var connected = true;
+  var COLORS = { ok: 'var(--led-ok)', warn: 'var(--led-warn)', bad: 'var(--led-bad)', idle: 'var(--led-idle)', off: '#3A4650' };
+  var ts = 'running';          // running | stopped | stuck
+  var power = 'on';            // on | off | boot
   var busy = false;
-  var clock = new Date(2026, 10, 11, 14, 46, 0);
+  var stoppedAt = null;        // 끊긴 시각(시뮬레이션 시계)
+  var watchAgo = 18;           // 감시 작업이 마지막으로 확인한 지 몇 초
+  var clock = new Date(2026, 10, 18, 14, 46, 0);
+  var toastTimer = null, tipTimer = null;
 
-  function stamp(addSec) {
-    clock = new Date(clock.getTime() + (addSec || 0) * 1000);
-    function p(n) { return n < 10 ? '0' + n : '' + n; }
-    return p(clock.getHours()) + ':' + p(clock.getMinutes()) + ':' + p(clock.getSeconds());
+  function p2(n) { return n < 10 ? '0' + n : '' + n; }
+  function advance(sec) { clock = new Date(clock.getTime() + (sec || 0) * 1000); renderClock(); }
+  function renderClock() {
+    var h = clock.getHours(), m = clock.getMinutes();
+    var ampm = h < 12 ? '오전' : '오후', h12 = h % 12 === 0 ? 12 : h % 12;
+    clockEl.innerHTML = ampm + ' ' + h12 + ':' + p2(m) + '<br>' + clock.getFullYear() + '-' + p2(clock.getMonth() + 1) + '-' + p2(clock.getDate());
   }
   function line(text, cls, addSec) {
+    advance(addSec);
     var li = document.createElement('li');
-    var t = document.createElement('span');
-    t.className = 't';
-    t.textContent = stamp(addSec) + '  ';
-    var m = document.createElement('span');
-    if (cls) m.className = cls;
-    m.textContent = text;
-    li.appendChild(t); li.appendChild(m);
-    log.appendChild(li);
-    while (log.children.length > 9) log.removeChild(log.firstChild);
-  }
-  function setState(s) {
-    led.setAttribute('data-state', s);
-    statusText.textContent = { running: '연결됨', stopped: '끊김', off: '전원 꺼짐', booting: '부팅 중' }[s];
-  }
-  function render() {
-    btnToggle.textContent = connected ? '연결 끊기' : '연결하기';
-    btnToggle.disabled = busy; btnReboot.disabled = busy; chk.disabled = busy;
+    var t = document.createElement('span'); t.className = 't';
+    t.textContent = p2(clock.getHours()) + ':' + p2(clock.getMinutes()) + ':' + p2(clock.getSeconds()) + '  ';
+    var m = document.createElement('span'); if (cls) m.className = cls; m.textContent = text;
+    li.appendChild(t); li.appendChild(m); log.appendChild(li);
+    while (log.children.length > 12) log.removeChild(log.firstChild);
   }
   function wait(ms) { return new Promise(function (r) { setTimeout(r, reduce ? 0 : ms); }); }
 
+  function tone() {
+    if (power === 'off') return 'off';
+    if (power === 'boot') return 'idle';
+    return ts === 'running' ? 'ok' : 'warn';
+  }
+  function minutesLeft() {
+    if (stoppedAt === null) return 60;
+    return Math.max(1, 60 - Math.floor((clock - stoppedAt) / 60000));   // 관리 앱과 같은 계산
+  }
+  function trayLines() {
+    var a;
+    if (power === 'boot') return '확인하는 중…';
+    if (ts === 'running') a = '연결됨 · my-pc · 100.101.102.103';
+    else if (ts === 'stopped') a = '끊김 · 약 ' + (minutesLeft() >= 60 ? '1시간' : minutesLeft() + '분') + ' 뒤 다시 연결';
+    else a = '연결 안 됨 · 다른 기기에서는 offline';
+    return a + '\n감시 정상 · ' + watchAgo + '초 전 확인';
+  }
+  function render() {
+    var t = tone();
+    var label = power === 'off' ? '전원 꺼짐' : power === 'boot' ? '부팅 중'
+      : ts === 'running' ? '연결됨' : ts === 'stopped' ? '끊김' : '연결 안 됨';
+    led.style.setProperty('--c', COLORS[t]);
+    stateText.textContent = label;
+    trayBtn.style.setProperty('--c', COLORS[t === 'off' ? 'idle' : t]);
+    trayBtn.hidden = !chk.checked || power !== 'on' && power !== 'boot';
+    tip.textContent = 'Tailscale Force Connect\n' + trayLines();
+    btnToggle.firstChild.nodeValue = ts === 'running' ? '연결 끊기' : '연결하기';
+    btnToggle.querySelector('small').textContent = ts === 'running' ? 'Disconnect' : 'Connect';
+    btnToggle.disabled = busy || power !== 'on';
+    btnWait.disabled = busy || power !== 'on' || ts !== 'stopped';
+    btnSleep.disabled = busy || power !== 'on' || ts !== 'running';
+    btnReboot.disabled = busy;
+    chk.disabled = busy;
+  }
+  function ping() {
+    if (trayBtn.hidden) return;
+    trayBtn.classList.remove('ping'); void trayBtn.offsetWidth; trayBtn.classList.add('ping');
+  }
+  function showTip(ms) {
+    if (trayBtn.hidden) return;
+    tip.classList.add('show'); trayBtn.setAttribute('aria-expanded', 'true');
+    clearTimeout(tipTimer);
+    if (ms) tipTimer = setTimeout(hideTip, ms);
+  }
+  function hideTip() { tip.classList.remove('show'); trayBtn.setAttribute('aria-expanded', 'false'); }
+  function showToast(title, body) {
+    if (!chk.checked) return;   // 알림은 이 도구가 띄운다
+    hideTip();                  // 둘 다 오른쪽 아래라 겹친다
+    $('toast-title').textContent = title; $('toast-body').textContent = body;
+    toast.classList.add('show');
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(function () { toast.classList.remove('show'); }, reduce ? 6000 : 5200);
+  }
+  function hideToast() { clearTimeout(toastTimer); toast.classList.remove('show'); }
+  function tick(sec) { watchAgo = Math.min(59, (watchAgo + sec) % 60 || 3); }
+  // 상태가 바뀌면 아이콘을 깜빡이고, 알림이 떠 있지 않으면 툴팁을 잠깐 보여 준다.
+  function changed() { render(); ping(); if (!toast.classList.contains('show')) showTip(2600); }
+
+  trayBtn.addEventListener('mouseenter', function () { showTip(); });
+  trayBtn.addEventListener('mouseleave', function () { hideTip(); });
+  trayBtn.addEventListener('focus', function () { showTip(); });
+  trayBtn.addEventListener('blur', function () { hideTip(); });
+  trayBtn.addEventListener('click', function () { tip.classList.contains('show') ? hideTip() : showTip(4000); });
+  toast.addEventListener('click', hideToast);
+
+  // 연결 끊기 / 연결하기
   btnToggle.addEventListener('click', function () {
-    connected = !connected;
-    if (connected) { setState('running'); line('사용자가 Connect → 연결됨', 'ok', 3); }
-    else { setState('stopped'); line('사용자가 Disconnect → WantRunning=false', 'warn', 3); }
-    render();
+    if (ts === 'running') {
+      ts = 'stopped'; stoppedAt = new Date(clock.getTime() + 3000);
+      line('사용자가 Disconnect → WantRunning=false', 'warn', 3);
+      if (chk.checked) {
+        line('감시: 끊긴 상태 확인 - 60 분 뒤에도 끊겨 있으면 다시 연결', 'dim', 40);
+        showToast('Tailscale 연결이 끊겼습니다', '약 1시간 뒤 자동으로 다시 연결합니다. 1분마다 상태를 확인하고 있습니다.');
+      }
+    } else {
+      ts = 'running'; stoppedAt = null; hideToast();
+      line('사용자가 Connect → 연결됨', 'ok', 5);
+    }
+    tick(7); changed();
   });
 
+  // 1시간 빨리 감기
+  btnWait.addEventListener('click', function () {
+    busy = true; render(); hideToast();
+    desktop.classList.add('dim');
+    wait(500).then(function () {
+      desktop.classList.remove('dim');
+      advance(60 * 60 - 40);
+      if (!chk.checked) {
+        line('1시간이 지났지만 끊긴 상태 그대로', 'warn', 0);
+        return;
+      }
+      line('감시: 60 분 동안 끊겨 있음 -> tailscale up', null, 0);
+      return wait(900).then(function () {
+        ts = 'running'; stoppedAt = null;
+        line('직접 끊은 지 60 분이 지나 다시 연결함', 'ok', 4);
+        showToast('Tailscale에 다시 연결됐습니다', '끊긴 것을 알린 지 1시간 만에 연결이 돌아왔습니다.');
+      });
+    }).then(function () { busy = false; tick(11); changed(); });
+  });
+
+  // 절전에서 깨어난 뒤 멈춤
+  btnSleep.addEventListener('click', function () {
+    busy = true; hideToast(); render();
+    desktop.classList.add('dim');
+    line('절전 모드', 'dim', 2);
+    wait(900).then(function () {
+      desktop.classList.remove('dim');
+      advance(2 * 60 * 60);
+      ts = 'stuck';
+      line('절전에서 깨어남 · Tailscale 트레이는 "연결됨"', null, 0);
+      line('다른 기기에서는 offline (network is down)', 'warn', 2);
+      changed();
+      if (!chk.checked) return wait(900).then(function () { line('그대로 두면 계속 offline', 'warn', 60); });
+      return wait(1200).then(function () {
+        line('감시: 멈춘 상태가 1 분째 이어짐 - 연결됨으로 보이지만 서버와 연결되지 않음. 3 분이 되면 Tailscale 서비스를 다시 시작', 'warn', 60);
+        return wait(1300);
+      }).then(function () {
+        line('복구: 3 분 동안 멈춤 -> Tailscale 서비스 다시 시작', null, 120);
+        return wait(1100);
+      }).then(function () {
+        ts = 'running';
+        line('복구: 3 분 동안 멈춤 -> 서비스를 다시 시작해 12 초 만에 연결됨', 'ok', 12);
+        showToast('Tailscale을 다시 시작했습니다', '연결된 것처럼 보였지만 3분 동안 서버와 연결되지 않아 서비스를 다시 시작했고, 연결이 돌아왔습니다.');
+      });
+    }).then(function () { busy = false; tick(9); changed(); });
+  });
+
+  // 재부팅
   btnReboot.addEventListener('click', function () {
-    busy = true; render();
+    busy = true; hideToast(); hideTip();
+    var wasStopped = ts === 'stopped';
     line('재부팅', null, 2);
-    setState('off');
-    screen.classList.add('off');
+    power = 'off'; render();
+    poweroffText.textContent = '전원 꺼짐';
+    poweroff.classList.add('on');
     wait(900).then(function () {
       log.innerHTML = '';
-      screen.classList.remove('off');
-      setState('booting');
-      line('Windows 시작 · Tailscale 서비스 실행', null, 25);
-      if (connected) return wait(700).then(function () { line('마지막 상태 기억 → 연결됨', 'ok', 4); });
-      return wait(700).then(function () {
-        line('마지막 상태 기억 → 끊긴 채로 시작', 'warn', 4);
-        if (!chk.checked) return;
-        return wait(900).then(function () {
-          line('--- 시작 --- (예약 작업, +20초)', null, 20);
-          return wait(700);
-        }).then(function () {
-          line("상태 'Stopped' -> tailscale up (시도 1)", null, 0);
-          return wait(1100);
-        }).then(function () {
-          connected = true;
-          line('연결됨 (시도 2)', 'ok', 11);
-        });
+      poweroffText.innerHTML = ''; var s = document.createElement('div'); s.className = 'spinner'; poweroffText.appendChild(s);
+      return wait(800);
+    }).then(function () {
+      poweroff.classList.remove('on');
+      power = 'boot'; render();
+      line('Windows 시작 · Tailscale 서비스 실행', null, 30);
+      return wait(700);
+    }).then(function () {
+      if (!wasStopped) { ts = 'running'; line('마지막 상태 기억 → 연결됨', 'ok', 4); return; }
+      line('마지막 상태 기억 → 끊긴 채로 시작', 'warn', 4);
+      if (!chk.checked) { line('예약 작업 없음 → 끊긴 상태 유지', 'warn', 1); ts = 'stopped'; stoppedAt = new Date(clock.getTime()); return; }
+      return wait(900).then(function () {
+        line('--- 시작 --- (예약 작업, 부팅 20초 뒤)', 'dim', 16);
+        return wait(700);
+      }).then(function () {
+        line("상태 'Stopped' -> tailscale up (시도 1)", null, 0);
+        return wait(1000);
+      }).then(function () {
+        ts = 'running'; stoppedAt = null;
+        line('연결됨 (시도 2)', 'ok', 11);
       });
     }).then(function () {
-      if (!connected && !chk.checked) line('예약 작업 없음 → 끊긴 상태 유지', 'warn', 1);
-      setState(connected ? 'running' : 'stopped');
-      busy = false; render();
+      power = 'on'; busy = false; watchAgo = 6; changed();
     });
   });
 
   chk.addEventListener('change', function () {
-    line(chk.checked ? '예약 작업 Tailscale Auto Connect 등록' : '예약 작업 삭제', null, 5);
+    if (chk.checked) line('설치: 예약 작업 등록 · 트레이 아이콘 켜짐', 'ok', 30);
+    else { line('제거: 예약 작업과 트레이 아이콘 삭제', 'dim', 30); hideToast(); hideTip(); }
+    render(); ping();
   });
 
-  // 초기 로그
+  // 처음 화면
+  renderClock();
+  if (root.hasAttribute('data-cover')) {
+    // 공유 이미지: 직접 끊은 지 1시간 뒤 다시 연결된 장면
+    line('사용자가 Disconnect → WantRunning=false', 'warn', 0);
+    line('감시: 끊긴 상태 확인 - 60 분 뒤에도 끊겨 있으면 다시 연결', 'dim', 40);
+    line('감시: 60 분 동안 끊겨 있음 -> tailscale up', null, 3560);
+    line('직접 끊은 지 60 분이 지나 다시 연결함', 'ok', 4);
+    render();
+    $('toast-title').textContent = 'Tailscale에 다시 연결됐습니다';
+    $('toast-body').textContent = '끊긴 것을 알린 지 1시간 만에 연결이 돌아왔습니다.';
+    toast.classList.add('show');
+    return;
+  }
   line('Windows 시작 · Tailscale 서비스 실행', null, 0);
   line('연결됨', 'ok', 3);
-  line('먼저 [연결 끊기], 그다음 [재부팅]을 눌러 보세요', null, 1);
+  line('[연결 끊기]나 [절전 후 깨우기]를 눌러 보세요', 'dim', 1);
   render();
-
-  // 명령어 복사
-  Array.prototype.forEach.call(document.querySelectorAll('.copy'), function (b) {
-    b.addEventListener('click', function () {
-      var text = b.parentNode.querySelector('code').textContent;
-      function done(msg) { b.textContent = msg; setTimeout(function () { b.textContent = '복사'; }, 1600); }
-      if (navigator.clipboard && navigator.clipboard.writeText) {
-        navigator.clipboard.writeText(text).then(function () { done('복사됨'); }, function () { done('직접 선택해 복사'); });
-      } else { done('직접 선택해 복사'); }
-    });
-  });
 })();
 </script>
 </body>

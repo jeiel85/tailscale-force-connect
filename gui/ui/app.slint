@@ -212,7 +212,7 @@ export component AppWindow inherits Window {
     default-font-family: "Malgun Gothic";
     default-font-size: 14px;
 
-    in property <string> version: "1.9.0";
+    in property <string> version: "1.10.0";
     in property <bool> installed;
     // running | stuck(켜져 있지만 서버와 연결 안 됨) | stopped | login | missing | unknown
     in property <string> state: "unknown";
@@ -246,6 +246,12 @@ export component AppWindow inherits Window {
     in property <string> update-note;
     // Windows 알림(끊김·재연결·멈춤 복구·새 버전). 사용자마다 따로 켜고 끈다.
     in-out property <bool> notify-on: true;
+    // 작업 표시줄 알림 영역의 상태 아이콘. 사용자마다 따로 켜고 끈다.
+    in-out property <bool> tray-on: true;
+    // 감시 작업(SYSTEM)이 마지막으로 확인한 때. 비어 있으면 숨긴다(설치 안 됨, 감시 꺼짐).
+    in property <string> watch-text;
+    // 0 정상, 1 확인 전(켜진 직후 등), 2 멈춘 것 같음
+    in property <int> watch-tone;
     // 원격 접속 중일 때 동작 확인 전에 띄우는 경고
     in-out property <bool> confirm-test-visible;
     in property <string> confirm-test-text;
@@ -280,6 +286,7 @@ export component AppWindow inherits Window {
     callback check-update();
     callback restart-tailscale();
     callback notify-toggled(bool);
+    callback tray-toggled(bool);
     callback confirm-test();
 
     property <color> state-color: root.state == "running" ? Theme.green
@@ -454,6 +461,26 @@ export component AppWindow inherits Window {
                             dot: root.heal-on ? Theme.green : Theme.grey;
                         }
                     }
+                    // 감시 작업이 살아 있는지. 정상일 때도 기록을 남기지 않는 작업이라, 마지막 확인 시각으로 보여 준다.
+                    if root.watch-text != "": HorizontalLayout {
+                        spacing: 8px;
+                        VerticalLayout {
+                            alignment: start;
+                            padding-top: 5px;
+                            Rectangle {
+                                width: 7px;
+                                height: 7px;
+                                border-radius: 3.5px;
+                                background: root.watch-tone == 0 ? Theme.green : root.watch-tone == 2 ? Theme.red : Theme.grey;
+                            }
+                        }
+                        WrapText {
+                            text: root.watch-text;
+                            color: root.watch-tone == 2 ? Theme.red : Theme.muted;
+                            font-weight: root.watch-tone == 2 ? 700 : 400;
+                            horizontal-stretch: 1;
+                        }
+                    }
                 }
             }
 
@@ -473,6 +500,13 @@ export component AppWindow inherits Window {
                             }
                         }
                         CheckBox {
+                            text: "트레이 아이콘";
+                            checked <=> root.tray-on;
+                            toggled => {
+                                root.tray-toggled(self.checked);
+                            }
+                        }
+                        CheckBox {
                             text: "Windows 알림";
                             checked <=> root.notify-on;
                             toggled => {
@@ -481,7 +515,7 @@ export component AppWindow inherits Window {
                         }
                     }
                     WrapText {
-                        text: "트레이에서 Disconnect를 눌러도 이 시간이 지나면 다시 연결합니다. 1분마다 확인하므로 몇 분 늦을 수 있고, 끊기거나 다시 연결되면 Windows 알림으로 알려 드립니다.";
+                        text: "Tailscale 트레이에서 Disconnect를 눌러도 이 시간이 지나면 다시 연결합니다. 1분마다 확인하므로 몇 분 늦을 수 있고, 끊기거나 다시 연결되면 Windows 알림으로 알려 드립니다.";
                         color: Theme.muted;
                     }
                     HorizontalLayout {
@@ -545,7 +579,7 @@ export component AppWindow inherits Window {
                                 alignment: center;
                                 horizontal-stretch: 1;
                                 WrapText {
-                                    text: "트레이는 정상인데 다른 기기에서 접속이 안 될 때 누르세요. 연결이 잠깐 끊깁니다.";
+                                    text: "Tailscale 트레이는 정상인데 다른 기기에서 접속이 안 될 때 누르세요. 연결이 잠깐 끊깁니다.";
                                     color: Theme.muted;
                                 }
                             }
@@ -1014,6 +1048,48 @@ export component AppWindow inherits Window {
                     font-size: 13px;
                     wrap: word-wrap;
                 }
+            }
+        }
+    }
+}
+
+// 작업 표시줄 알림 영역의 상태 아이콘(TailscaleForceConnect.exe --tray). 창 없이 아이콘과 메뉴만 있다.
+// 아이콘 그림은 상태 색에 맞춰 Rust에서 그려 넣는다(앱 아이콘과 같은 모양, 가운데 원의 색만 다름).
+// 왼쪽 클릭은 관리 창을 열고, 오른쪽 클릭 메뉴 위쪽 두 줄은 지금 상태(누를 수 없음)다.
+export component StatusTray inherits SystemTrayIcon {
+    in property <image> status-icon;
+    in property <string> tip: "Tailscale Force Connect";
+    in property <string> state-line: "확인하는 중…";
+    in property <string> watch-line: " ";
+    callback open-window();
+    callback turn-off();
+
+    icon: root.status-icon;
+    tooltip: root.tip;
+    clicked => {
+        root.open-window();
+    }
+
+    Menu {
+        MenuItem {
+            title: root.state-line;
+            enabled: false;
+        }
+        MenuItem {
+            title: root.watch-line;
+            enabled: false;
+        }
+        MenuSeparator { }
+        MenuItem {
+            title: "관리 창 열기";
+            activated => {
+                root.open-window();
+            }
+        }
+        MenuItem {
+            title: "트레이 아이콘 끄기";
+            activated => {
+                root.turn-off();
             }
         }
     }
